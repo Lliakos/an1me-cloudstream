@@ -2,7 +2,6 @@ package com.an1me
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.fasterxml.jackson.annotation.JsonProperty
 import org.jsoup.nodes.Element
 import java.util.Base64
 
@@ -18,81 +17,74 @@ class An1meProvider : MainAPI() {
         TvType.OVA
     )
 
-    // API endpoint discovered from network inspection
-    private val apiUrl = "$mainUrl/wp-json/kiranime/v1"
-
     override val mainPage = mainPageOf(
-        "$apiUrl/anime/latest?page=" to "Latest Episodes",
-        "$apiUrl/anime/trending?page=" to "Trending",
-        "$apiUrl/anime/popular?page=" to "Popular"
+        "/recent" to "Latest Episodes",
+        "/trending" to "Trending",
+        "/popular" to "Popular"
     )
 
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val url = request.data + page
-        val response = app.get(url).parsedSafe<ApiResponse>()
+        val document = app.get("$mainUrl${request.data}").document
         
-        val home = response?.data?.mapNotNull { anime ->
-            newAnimeSearchResponse(
-                name = anime.title ?: return@mapNotNull null,
-                url = "$mainUrl/anime/${anime.slug}",
-                type = getType(anime.type)
-            ) {
-                this.posterUrl = anime.image
-            }
-        } ?: emptyList()
+        val home = document.select("div.anime-card, div.film_list-wrap > div.flw-item").mapNotNull {
+            it.toSearchResponse()
+        }
 
         return newHomePageResponse(request.name, home)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        // Using the API endpoint found in network tab
-        val searchUrl = "$apiUrl/anime/search?query=$query&lang=jp&_locale=user"
-        val response = app.get(searchUrl).parsedSafe<ApiResponse>()
+        val searchUrl = "$mainUrl/search?q=$query"
+        val document = app.get(searchUrl).document
 
-        return response?.data?.mapNotNull { anime ->
-            newAnimeSearchResponse(
-                name = anime.title ?: return@mapNotNull null,
-                url = "$mainUrl/anime/${anime.slug}",
-                type = getType(anime.type)
-            ) {
-                this.posterUrl = anime.image
-            }
-        } ?: emptyList()
+        return document.select("div.anime-card, div.search-result-item, div.flw-item").mapNotNull {
+            it.toSearchResponse()
+        }
+    }
+
+    private fun Element.toSearchResponse(): AnimeSearchResponse? {
+        val title = this.selectFirst("h3, h2, div.film-name a, a.title")?.text() ?: return null
+        val href = fixUrlNull(this.selectFirst("a")?.attr("href")) ?: return null
+        val posterUrl = fixUrlNull(
+            this.selectFirst("img")?.attr("data-src") 
+                ?: this.selectFirst("img")?.attr("src")
+        )
+        
+        return newAnimeSearchResponse(title, href, TvType.Anime) {
+            this.posterUrl = posterUrl
+        }
     }
 
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
         
-        // Extract anime information from the page
-        val title = document.selectFirst("h1.entry-title")?.text()
-            ?: document.selectFirst("h1")?.text()
+        val title = document.selectFirst("h1.entry-title, h1.anime-title, h1")?.text()
             ?: throw ErrorLoadingException("No title found")
         
-        val poster = document.selectFirst("div.anime-poster img")?.attr("src")
-            ?: document.selectFirst("img[alt*='$title']")?.attr("src")
+        val poster = fixUrlNull(
+            document.selectFirst("div.anime-poster img, img.film-poster-img")?.attr("src")
+        )
         
-        val description = document.selectFirst("div.anime-description")?.text()
-            ?: document.selectFirst("div.entry-content p")?.text()
+        val description = document.selectFirst("div.anime-description, div.description, div.film-description")?.text()
         
-        val tags = document.select("a[rel='tag']").map { it.text() }
+        val tags = document.select("a[rel='tag'], div.genres a").map { it.text() }
         
-        val year = document.selectFirst("span:contains(Year)")
-            ?.parent()?.text()?.substringAfter(":")?.trim()?.toIntOrNull()
+        val year = document.selectFirst("span:contains(Year), div.item:contains(Released)")
+            ?.text()?.filter { it.isDigit() }?.toIntOrNull()
         
-        // Extract episodes
-        val episodes = document.select("div.episode-list-item").mapNotNull {
-            val episodeTitle = it.selectFirst("span.episode-list-item-title")?.text()
-                ?: return@mapNotNull null
-            val episodeUrl = it.selectFirst("a")?.attr("href") ?: return@mapNotNull null
+        val episodes = document.select("div.episode-list-item, ul.episodes-list li, div.ss-list a").mapIndexed { index, ep ->
+            val episodeTitle = ep.selectFirst("span.episode-list-item-title, span")?.text() 
+                ?: "Episode ${index + 1}"
+            val episodeUrl = fixUrl(ep.selectFirst("a")?.attr("href") ?: ep.attr("href"))
             
-            // Use newEpisode constructor as per documentation
             newEpisode(episodeUrl) {
                 this.name = episodeTitle
+                this.episode = index + 1
             }
-        }.reversed() // Reverse to show Episode 1 first
+        }.reversed()
 
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = poster
@@ -111,79 +103,57 @@ class An1meProvider : MainAPI() {
     ): Boolean {
         val document = app.get(data).document
         
-        // Find the iframe with video source
-        // From investigation: <iframe src="https://an1me.to/kr-video/{base64}?params">
-        val iframe = document.selectFirst("iframe[src*='kr-video']")?.attr("src")
+        // Find iframe with video source
+        val iframe = document.selectFirst("iframe[src*='kr-video'], iframe[src*='player']")?.attr("src")
             ?: return false
         
-        // The iframe src contains a base64 encoded m3u8 URL
-        // Format: https://an1me.to/kr-video/{base64EncodedUrl}?params
-        val base64Part = iframe.substringAfter("/kr-video/").substringBefore("?")
+        val fullIframeUrl = fixUrl(iframe)
         
-        return try {
-            // Decode the base64 to get actual video URL
-            // Example decoded: https://cdn2.an1me.io/simple/ova-special-random/....m3u8
-            val decodedUrl = String(Base64.getDecoder().decode(base64Part))
+        // Check if it's the base64 encoded format
+        if (iframe.contains("/kr-video/")) {
+            try {
+                val base64Part = iframe.substringAfter("/kr-video/").substringBefore("?")
+                val decodedUrl = String(Base64.getDecoder().decode(base64Part))
+                
+                callback.invoke(
+                    ExtractorLink(
+                        source = name,
+                        name = name,
+                        url = decodedUrl,
+                        referer = mainUrl,
+                        quality = Qualities.Unknown.value,
+                        isM3u8 = true
+                    )
+                )
+                
+                return true
+            } catch (e: Exception) {
+                // If decoding fails, continue to fallback
+            }
+        }
+        
+        // Fallback: Load iframe and extract video
+        try {
+            val iframeDoc = app.get(fullIframeUrl, referer = data).document
+            
+            val videoUrl = iframeDoc.selectFirst("source")?.attr("src")
+                ?: iframeDoc.selectFirst("video")?.attr("src")
+                ?: return false
             
             callback.invoke(
                 ExtractorLink(
                     source = name,
-                    name = "$name - HLS",
-                    url = decodedUrl,
-                    referer = mainUrl,
+                    name = name,
+                    url = videoUrl,
+                    referer = fullIframeUrl,
                     quality = Qualities.Unknown.value,
-                    isM3u8 = true
+                    isM3u8 = videoUrl.contains(".m3u8")
                 )
             )
             
-            true
+            return true
         } catch (e: Exception) {
-            // Fallback: If base64 decoding fails, try to load the iframe directly
-            try {
-                val iframeDoc = app.get(iframe, referer = data).document
-                val videoSrc = iframeDoc.selectFirst("video source")?.attr("src")
-                    ?: iframeDoc.selectFirst("video")?.attr("src")
-                
-                if (videoSrc != null) {
-                    callback.invoke(
-                        ExtractorLink(
-                            source = name,
-                            name = "$name - Direct",
-                            url = videoSrc,
-                            referer = iframe,
-                            quality = Qualities.Unknown.value,
-                            isM3u8 = videoSrc.contains(".m3u8")
-                        )
-                    )
-                    true
-                } else {
-                    false
-                }
-            } catch (e: Exception) {
-                false
-            }
+            return false
         }
     }
-
-    private fun getType(type: String?): TvType {
-        return when (type?.lowercase()) {
-            "movie" -> TvType.AnimeMovie
-            "ova" -> TvType.OVA
-            "special" -> TvType.OVA
-            else -> TvType.Anime
-        }
-    }
-
-    // Data classes for API responses
-    // Using Jackson annotations as per documentation
-    data class ApiResponse(
-        @JsonProperty("data") val data: List<AnimeData>?
-    )
-
-    data class AnimeData(
-        @JsonProperty("title") val title: String?,
-        @JsonProperty("slug") val slug: String?,
-        @JsonProperty("image") val image: String?,
-        @JsonProperty("type") val type: String?
-    )
 }
