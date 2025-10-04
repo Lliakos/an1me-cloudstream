@@ -1,13 +1,13 @@
 // use an integer for version numbers
-version = 1
+version = 2
 
 cloudstream {
-    language = "en"
+    language = "gr"
     
     // All of these properties are optional, you can safely remove them
 
     description = "Stream anime from An1me.to with full API integration"
-    authors = listOf("YourName")
+    authors = listOf("REMLKA")
 
     /**
      * Status int as the following:
@@ -16,7 +16,7 @@ cloudstream {
      * 2: Slow
      * 3: Beta only
      * */
-    status = 1 // will be 3 if unspecified
+    status = 3 // will be 3 if unspecified
     tvTypes = listOf(
         "Anime",
         "AnimeMovie",
