@@ -15,21 +15,23 @@ class An1meProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val document = app.get(mainUrl).document
         
-        // Find all anime links on homepage
-        val home = document.select("a[href*='/anime/']").mapNotNull {
-            val href = it.attr("href")
-            if (!href.contains("/anime/") || href.contains("/watch/")) return@mapNotNull null
+        // Select the list items containing anime
+        val home = document.select("li[class*='bg-tertiary']").mapNotNull { li ->
+            val link = li.selectFirst("a[href*='/anime/']") ?: return@mapNotNull null
+            val href = link.attr("href")
             
-            val title = it.attr("data-tippy-content-to").takeIf { t -> t.isNotEmpty() }
-                ?: it.selectFirst("img")?.attr("alt")
+            // Get title from span elements
+            val title = li.selectFirst("span[data-en-title]")?.text()
+                ?: li.selectFirst("span[data-nt-title]")?.text()
+                ?: link.attr("title")
                 ?: return@mapNotNull null
             
-            val posterUrl = it.selectFirst("img")?.attr("src")
+            val posterUrl = li.selectFirst("img")?.attr("src")
             
             newAnimeSearchResponse(title, href, TvType.Anime) {
                 this.posterUrl = posterUrl
             }
-        }.distinctBy { it.url }
+        }
         
         return newHomePageResponse("Latest Anime", home)
     }
@@ -37,20 +39,21 @@ class An1meProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val document = app.get("$mainUrl/?s=$query").document
         
-        return document.select("a[href*='/anime/']").mapNotNull {
-            val href = it.attr("href")
-            if (!href.contains("/anime/") || href.contains("/watch/")) return@mapNotNull null
+        return document.select("li[class*='bg-tertiary']").mapNotNull { li ->
+            val link = li.selectFirst("a[href*='/anime/']") ?: return@mapNotNull null
+            val href = link.attr("href")
             
-            val title = it.attr("data-tippy-content-to").takeIf { t -> t.isNotEmpty() }
-                ?: it.selectFirst("img")?.attr("alt")
+            val title = li.selectFirst("span[data-en-title]")?.text()
+                ?: li.selectFirst("span[data-nt-title]")?.text()
+                ?: link.attr("title")
                 ?: return@mapNotNull null
             
-            val posterUrl = it.selectFirst("img")?.attr("src")
+            val posterUrl = li.selectFirst("img")?.attr("src")
             
             newAnimeSearchResponse(title, href, TvType.Anime) {
                 this.posterUrl = posterUrl
             }
-        }.distinctBy { it.url }
+        }
     }
 
     override suspend fun load(url: String): LoadResponse {
