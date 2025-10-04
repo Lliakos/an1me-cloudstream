@@ -37,8 +37,26 @@ class An1meProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.get("$mainUrl/?s=$query").document
-        return document.select("li").mapNotNull { it.toSearchResult() }
+        val encodedQuery = query.replace(" ", "+")
+        val document = app.get("$mainUrl/?s=$encodedQuery").document
+        
+        // Try multiple selectors for search results
+        val selectors = listOf(
+            "li", 
+            "div.anime-item", 
+            "div.search-item",
+            "div.item",
+            "article"
+        )
+        
+        for (selector in selectors) {
+            val results = document.select(selector).mapNotNull { it.toSearchResult() }
+            if (results.isNotEmpty()) {
+                return results
+            }
+        }
+        
+        return emptyList()
     }
 
     override suspend fun load(url: String): LoadResponse {
@@ -56,25 +74,69 @@ class An1meProvider : MainAPI() {
         val description = document.selectFirst("div.description")?.text()
             ?: document.selectFirst("div.entry-content")?.text()
         
-        val episodes = document.select("a.episode-list-item").mapNotNull { ep ->
-            val episodeUrl = ep.attr("href")
-            if (episodeUrl.isEmpty()) return@mapNotNull null
-            
-            val episodeNumber = ep.selectFirst("span.episode-list-item-number")?.text()
-                ?.trim()?.toIntOrNull() ?: 0
-            val episodeTitle = ep.selectFirst("span.episode-list-item-title")?.text() 
-                ?: "Episode $episodeNumber"
-            
-            newEpisode(episodeUrl) {
-                this.name = episodeTitle
-                this.episode = episodeNumber
+        // Enhanced episode detection with multiple selectors
+        val episodes = ArrayList<Episode>()
+        
+        // Try multiple selectors for episode lists
+        val episodeSelectors = listOf(
+            "a.episode-list-item",
+            "div.episodes-list a",
+            "div.episode-list a",
+            "ul.episodes-list li a",
+            "div.episodes a",
+            "div.episode a"
+        )
+        
+        for (selector in episodeSelectors) {
+            val foundEpisodes = document.select(selector).mapNotNull { ep ->
+                val episodeUrl = fixUrl(ep.attr("href"))
+                if (episodeUrl.isEmpty()) return@mapNotNull null
+                
+                // Try multiple ways to get episode number
+                val episodeNumber = ep.selectFirst("span.episode-list-item-number")?.text()?.trim()?.toIntOrNull()
+                    ?: ep.selectFirst("span.episode-number")?.text()?.trim()?.toIntOrNull()
+                    ?: ep.text().trim().replace("Episode", "").trim().toIntOrNull()
+                    ?: Regex("Episode\\s*(\\d+)").find(ep.text())?.groupValues?.get(1)?.toIntOrNull()
+                    ?: Regex("EP\\s*(\\d+)").find(ep.text())?.groupValues?.get(1)?.toIntOrNull()
+                    ?: 0
+                
+                val episodeTitle = ep.selectFirst("span.episode-list-item-title")?.text()
+                    ?: ep.selectFirst("span.episode-title")?.text()
+                    ?: "Episode $episodeNumber"
+                
+                newEpisode(episodeUrl) {
+                    this.name = episodeTitle
+                    this.episode = episodeNumber
+                }
             }
-        }.reversed()
+            
+            if (foundEpisodes.isNotEmpty()) {
+                episodes.addAll(foundEpisodes)
+                break
+            }
+        }
+        
+        // If no episodes found, create a dummy episode for testing
+        if (episodes.isEmpty()) {
+            val watchUrl = document.selectFirst("a.watch-button")?.attr("href")
+                ?: document.selectFirst("a.btn-watch")?.attr("href")
+                ?: document.selectFirst("a[href*='/watch/']")?.attr("href")
+                
+            if (!watchUrl.isNullOrEmpty()) {
+                episodes.add(newEpisode(fixUrl(watchUrl)) {
+                    this.name = "Episode 1"
+                    this.episode = 1
+                })
+            }
+        }
+        
+        // Sort episodes in descending order
+        val sortedEpisodes = episodes.sortedByDescending { it.episode }
 
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = poster
             this.plot = description
-            addEpisodes(DubStatus.Subbed, episodes)
+            addEpisodes(DubStatus.Subbed, sortedEpisodes)
         }
     }
 
