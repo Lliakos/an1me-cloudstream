@@ -7,7 +7,7 @@ import java.util.Base64
 class An1meProvider : MainAPI() {
     override var mainUrl = "https://an1me.to"
     override var name = "An1me"
-    override var lang = "en"
+    override var lang = "gr"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Anime)
 
