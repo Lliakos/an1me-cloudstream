@@ -103,16 +103,12 @@ class An1meProvider : MainAPI() {
             // Decode base64 to get the actual video URL
             val decodedUrl = String(Base64.getDecoder().decode(base64Part))
             
-            callback.invoke(
-                ExtractorLink(
-                    name,
-                    name,
-                    decodedUrl,
-                    mainUrl,
-                    Qualities.Unknown.value,
-                    isM3u8 = true
-                )
-            )
+            // Use M3u8Helper for m3u8 streams
+            M3u8Helper.generateM3u8(
+                name,
+                decodedUrl,
+                mainUrl
+            ).forEach(callback)
             
             true
         } catch (e: Exception) {
