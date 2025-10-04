@@ -42,7 +42,7 @@ subprojects {
     }
 
     android {
-        namespace = "com.example"
+        namespace = "com.an1me"
 
         defaultConfig {
             minSdk = 21
