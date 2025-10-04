@@ -7,7 +7,7 @@ cloudstream {
     // All of these properties are optional, you can safely remove them
 
     description = "Stream anime from An1me.to with full API integration"
-    authors = listOf("REMLKA")
+    authors = listOf("Llakccc")
 
     /**
      * Status int as the following:
