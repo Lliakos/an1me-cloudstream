@@ -104,12 +104,12 @@ class An1meProvider : MainAPI() {
             val decodedUrl = String(Base64.getDecoder().decode(base64Part))
             
             callback.invoke(
-                newExtractorLink(
-                    source = name,
-                    name = name,
-                    url = decodedUrl,
-                    referer = mainUrl,
-                    quality = Qualities.Unknown.value,
+                ExtractorLink(
+                    name,
+                    name,
+                    decodedUrl,
+                    mainUrl,
+                    Qualities.Unknown.value,
                     isM3u8 = true
                 )
             )
