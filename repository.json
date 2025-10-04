@@ -3,6 +3,6 @@
   "description": "Official CloudStream extensions for An1me.to",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://raw.githubusercontent.com/Lliakos/an1me-cloudstream/builds/plugins.json"
-  ]
+  "https://raw.githubusercontent.com/YOUR_USERNAME/an1me-cloudstream/builds/plugins.json?v=2"
+]
 }
