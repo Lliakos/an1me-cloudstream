@@ -2,10 +2,7 @@ package com.an1me
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import org.jsoup.nodes.Element
 import java.util.Base64
-import org.json.JSONObject
-import org.json.JSONArray
 
 class An1meProvider : MainAPI() {
     override var mainUrl = "https://an1me.to"
@@ -14,82 +11,27 @@ class An1meProvider : MainAPI() {
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Anime)
 
-    private val apiUrl = "$mainUrl/wp-json/kiranime/v1"
-
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        // Fetch from homepage and parse the rendered content
-        val document = app.get(mainUrl).document
+        // Simple test: just show some hardcoded anime to verify the plugin works
+        val testAnime = listOf(
+            newAnimeSearchResponse("Test Anime 1", "$mainUrl/anime/test1", TvType.Anime),
+            newAnimeSearchResponse("Test Anime 2", "$mainUrl/anime/test2", TvType.Anime),
+            newAnimeSearchResponse("Test Anime 3", "$mainUrl/anime/test3", TvType.Anime)
+        )
         
-        // Extract all anime URLs first
-        val animeUrls = document.select("a[href*='/anime/']")
-            .map { it.attr("href") }
-            .filter { it.contains("/anime/") && !it.contains("/watch/") }
-            .distinct()
-            .take(30)
-        
-        // For each URL, fetch the page to get full details
-        val home = animeUrls.mapNotNull { url ->
-            try {
-                val doc = app.get(url).document
-                val title = doc.selectFirst("h1.entry-title, h1")?.text() ?: return@mapNotNull null
-                val poster = doc.selectFirst("img")?.attr("src")
-                
-                newAnimeSearchResponse(title, url, TvType.Anime) {
-                    this.posterUrl = poster
-                }
-            } catch (e: Exception) {
-                null
-            }
-        }
-        
-        return newHomePageResponse("Latest Anime", home)
+        return newHomePageResponse("Latest Anime", testAnime)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        // Try using the API endpoint we discovered
-        val searchUrl = "$apiUrl/anime/search?query=$query"
-        
-        return try {
-            val response = app.get(searchUrl).text
-            val json = JSONObject(response)
-            val data = json.optJSONArray("data") ?: return emptyList()
-            
-            (0 until data.length()).mapNotNull { i ->
-                val anime = data.getJSONObject(i)
-                val title = anime.optString("title") ?: return@mapNotNull null
-                val slug = anime.optString("slug") ?: return@mapNotNull null
-                val image = anime.optString("image")
-                
-                newAnimeSearchResponse(title, "$mainUrl/anime/$slug", TvType.Anime) {
-                    this.posterUrl = image
-                }
-            }
-        } catch (e: Exception) {
-            // Fallback to HTML scraping
-            val document = app.get("$mainUrl/?s=$query").document
-            val animeUrls = document.select("a[href*='/anime/']")
-                .map { it.attr("href") }
-                .filter { it.contains("/anime/") && !it.contains("/watch/") }
-                .distinct()
-                .take(20)
-            
-            animeUrls.mapNotNull { url ->
-                try {
-                    val doc = app.get(url).document
-                    val title = doc.selectFirst("h1.entry-title, h1")?.text() ?: return@mapNotNull null
-                    val poster = doc.selectFirst("img")?.attr("src")
-                    
-                    newAnimeSearchResponse(title, url, TvType.Anime) {
-                        this.posterUrl = poster
-                    }
-                } catch (e: Exception) {
-                    null
-                }
-            }
-        }
+        // For now, return test results
+        return listOf(
+            newAnimeSearchResponse("Search Result 1", "$mainUrl/anime/result1", TvType.Anime),
+            newAnimeSearchResponse("Search Result 2", "$mainUrl/anime/result2", TvType.Anime)
+        )
     }
 
     override suspend fun load(url: String): LoadResponse {
+        // Load the actual page
         val document = app.get(url).document
         
         val title = document.selectFirst("h1.entry-title, h1")?.text() ?: "Unknown"
@@ -108,7 +50,7 @@ class An1meProvider : MainAPI() {
                 this.name = episodeTitle
                 this.episode = episodeNumber
             }
-        }.reversed()
+        }
 
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = poster
