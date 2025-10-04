@@ -1,0 +1,7 @@
+{
+  "name": "An1me Test",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/Lliakos/an1me-cloudstream/builds/plugins.json"
+  ]
+}
