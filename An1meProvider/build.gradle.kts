@@ -1,27 +1,17 @@
-// use an integer for version numbers
 version = 4
 
 cloudstream {
     language = "gr"
-    
-    // All of these properties are optional, you can safely remove them
-
-    description = "Stream anime from An1me.to with full API integration"
+    description = "Stream anime from An1me.to"
     authors = listOf("Llakccc")
-
-    /**
-     * Status int as the following:
-     * 0: Down
-     * 1: Ok
-     * 2: Slow
-     * 3: Beta only
-     * */
-    status = 1 // will be 3 if unspecified
-    tvTypes = listOf(
-        "Anime",
-        "AnimeMovie",
-        "OVA",
-    )
-
+    status = 1
+    tvTypes = listOf("Anime", "AnimeMovie", "OVA")
     iconUrl = "https://an1me.to/favicon.ico"
+    
+    // Add this to control the output name
+    name = "An1me"
+}
+
+android {
+    namespace = "com.an1me"
 }
