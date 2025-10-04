@@ -1,8 +1,8 @@
 {
   "name": "An1me.to Official Repository",
   "description": "Official CloudStream extensions for An1me.to",
-  "manifestVersion": 1,
+  "manifestVersion": 2,
   "pluginLists": [
-    "https://raw.githubusercontent.com/Lliakos/an1me-cloudstream/builds/plugins.json?v=4"
+    "https://raw.githubusercontent.com/Lliakos/an1me-cloudstream/builds/plugins.json"
   ]
 }
