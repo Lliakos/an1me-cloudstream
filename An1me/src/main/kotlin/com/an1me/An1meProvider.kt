@@ -194,16 +194,8 @@ class An1meProvider : MainAPI() {
                     true
                 }
                 decodedUrl.contains("googlevideo.com") || decodedUrl.contains("googleusercontent.com") -> {
-                    // Google Drive/Photos link - direct video
-                    callback.invoke(
-                        ExtractorLink(
-                            name,
-                            "$name Google",
-                            decodedUrl,
-                            mainUrl,
-                            Qualities.Unknown.value,
-                        )
-                    )
+                    // Google Drive/Photos link - try extractor
+                    loadExtractor(decodedUrl, data, subtitleCallback, callback)
                     true
                 }
                 decodedUrl.contains("wetransfer.com") -> {
