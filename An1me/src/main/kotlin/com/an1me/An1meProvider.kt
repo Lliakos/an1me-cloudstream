@@ -196,10 +196,9 @@ class An1meProvider : MainAPI() {
                     // Google Drive/Photos link - direct video
                     callback.invoke(
                         newExtractorLink(
-                            source = name,
                             name = "$name Google",
                             url = decodedUrl,
-                            referer = "",
+                            refererUrl = "",
                             quality = Qualities.Unknown.value,
                         )
                     )
