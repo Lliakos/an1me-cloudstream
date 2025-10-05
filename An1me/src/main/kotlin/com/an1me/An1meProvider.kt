@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import java.util.Base64
 
+@Suppress("DEPRECATION")
 class An1meProvider : MainAPI() {
     override var mainUrl = "https://an1me.to"
     override var name = "An1me"
@@ -195,11 +196,12 @@ class An1meProvider : MainAPI() {
                 decodedUrl.contains("googlevideo.com") || decodedUrl.contains("googleusercontent.com") -> {
                     // Google Drive/Photos link - direct video
                     callback.invoke(
-                        newExtractorLink(
-                            name = "$name Google",
-                            url = decodedUrl,
-                            refererUrl = "",
-                            quality = Qualities.Unknown.value,
+                        ExtractorLink(
+                            name,
+                            "$name Google",
+                            decodedUrl,
+                            mainUrl,
+                            Qualities.Unknown.value,
                         )
                     )
                     true
