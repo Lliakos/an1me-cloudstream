@@ -37,106 +37,68 @@ class An1meProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val encodedQuery = query.replace(" ", "+")
-        val document = app.get("$mainUrl/?s=$encodedQuery").document
-        
-        // Try multiple selectors for search results
-        val selectors = listOf(
-            "li", 
-            "div.anime-item", 
-            "div.search-item",
-            "div.item",
-            "article"
-        )
-        
-        for (selector in selectors) {
-            val results = document.select(selector).mapNotNull { it.toSearchResult() }
-            if (results.isNotEmpty()) {
-                return results
-            }
-        }
-        
-        return emptyList()
+        val document = app.get("$mainUrl/?s=$query").document
+        return document.select("li").mapNotNull { it.toSearchResult() }
     }
 
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
         
-        val title = document.selectFirst("h1.entry-title")?.text() 
-            ?: document.selectFirst("h1")?.text()
-            ?: "Unknown"
+        val title = document.selectFirst("h1.entry-title, h1")?.text() ?: "Unknown"
         
+        // Get poster
         val poster = fixUrlNull(
-            document.selectFirst("div.anime-poster img")?.attr("src")
-                ?: document.selectFirst("img")?.attr("src")
+            document.selectFirst("div.anime-poster img, img.poster")?.attr("src")
         )
         
-        val description = document.selectFirst("div.description")?.text()
-            ?: document.selectFirst("div.entry-content")?.text()
-        
-        // Enhanced episode detection with multiple selectors
-        val episodes = ArrayList<Episode>()
-        
-        // Try multiple selectors for episode lists
-        val episodeSelectors = listOf(
-            "a.episode-list-item",
-            "div.episodes-list a",
-            "div.episode-list a",
-            "ul.episodes-list li a",
-            "div.episodes a",
-            "div.episode a"
+        // Get background banner image
+        val backgroundPoster = fixUrlNull(
+            document.selectFirst("div.watch-section-bg")?.attr("style")
+                ?.substringAfter("url(")?.substringBefore(")")?.replace("'", "")?.replace("\"", "")
         )
         
-        for (selector in episodeSelectors) {
-            val foundEpisodes = document.select(selector).mapNotNull { ep ->
-                val episodeUrl = fixUrl(ep.attr("href"))
-                if (episodeUrl.isEmpty()) return@mapNotNull null
-                
-                // Try multiple ways to get episode number
-                val episodeNumber = ep.selectFirst("span.episode-list-item-number")?.text()?.trim()?.toIntOrNull()
-                    ?: ep.selectFirst("span.episode-number")?.text()?.trim()?.toIntOrNull()
-                    ?: ep.text().trim().replace("Episode", "").trim().toIntOrNull()
-                    ?: Regex("Episode\\s*(\\d+)").find(ep.text())?.groupValues?.get(1)?.toIntOrNull()
-                    ?: Regex("EP\\s*(\\d+)").find(ep.text())?.groupValues?.get(1)?.toIntOrNull()
-                    ?: 0
-                
-                val episodeTitle = ep.selectFirst("span.episode-list-item-title")?.text()
-                    ?: ep.selectFirst("span.episode-title")?.text()
-                    ?: "Episode $episodeNumber"
-                
-                newEpisode(episodeUrl) {
-                    this.name = episodeTitle
-                    this.episode = episodeNumber
-                }
-            }
+        // Get description/plot from data-synopsis attribute
+        val description = document.selectFirst("div[data-synopsis]")?.text()
+        
+        // Get genres/tags
+        val genres = document.select("a[href*='/genres/'], a[href*='/genre/']").map { it.text() }
+        
+        // Get year
+        val year = document.selectFirst("span:contains(Έτος), span:contains(Year)")
+            ?.parent()?.text()?.filter { it.isDigit() }?.toIntOrNull()
+        
+        // Get trailer
+        val trailerButton = document.selectFirst("button[onclick*='youtube']")
+        val trailerUrl = trailerButton?.attr("onclick")
+            ?.substringAfter("'")?.substringBefore("'")
+            ?.let { if (it.contains("youtube.com") || it.contains("youtu.be")) it else null }
+        
+        // Get episodes from swiper slides
+        val episodes = document.select("div.swiper-slide a[href*='/watch/']").mapNotNull { ep ->
+            val episodeUrl = fixUrl(ep.attr("href"))
+            if (episodeUrl.isEmpty() || !episodeUrl.contains("/watch/")) return@mapNotNull null
             
-            if (foundEpisodes.isNotEmpty()) {
-                episodes.addAll(foundEpisodes)
-                break
+            val episodeText = ep.selectFirst("span.absolute, span")?.text() 
+                ?: ep.attr("title")
+                ?: "Episode"
+            val episodeNumber = episodeText.filter { it.isDigit() }.toIntOrNull() ?: 1
+            
+            newEpisode(episodeUrl) {
+                this.name = episodeText
+                this.episode = episodeNumber
             }
-        }
-        
-        // If no episodes found, create a dummy episode for testing
-        if (episodes.isEmpty()) {
-            val watchUrl = document.selectFirst("a.watch-button")?.attr("href")
-                ?: document.selectFirst("a.btn-watch")?.attr("href")
-                ?: document.selectFirst("a[href*='/watch/']")?.attr("href")
-                
-            if (!watchUrl.isNullOrEmpty()) {
-                episodes.add(newEpisode(fixUrl(watchUrl)) {
-                    this.name = "Episode 1"
-                    this.episode = 1
-                })
-            }
-        }
-        
-        // Sort episodes in descending order
-        val sortedEpisodes = episodes.sortedByDescending { it.episode }
+        }.reversed()
 
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = poster
+            this.backgroundPosterUrl = backgroundPoster
             this.plot = description
-            addEpisodes(DubStatus.Subbed, sortedEpisodes)
+            this.tags = genres
+            this.year = year
+            if (trailerUrl != null) {
+                addTrailer(trailerUrl)
+            }
+            addEpisodes(DubStatus.Subbed, episodes)
         }
     }
 
@@ -152,7 +114,8 @@ class An1meProvider : MainAPI() {
         
         return try {
             val decodedUrl = String(Base64.getDecoder().decode(base64Part))
-            M3u8Helper.generateM3u8(name, decodedUrl, mainUrl).forEach(callback)
+            // Use loadExtractor to handle various video hosts (Google Photos, WeTransfer, etc.)
+            loadExtractor(decodedUrl, data, subtitleCallback, callback)
             true
         } catch (e: Exception) {
             false

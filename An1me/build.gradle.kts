@@ -1,9 +1,9 @@
-version = 7
+version = 8
 
 cloudstream {
     language = "gr"
     description = "Stream anime from An1me.to"
-    authors = listOf("Lliakos")
+    authors = listOf("Lliakosss")
     status = 1
     tvTypes = listOf("Anime", "AnimeMovie", "OVA")
     iconUrl = "https://an1me.to/favicon.ico"
