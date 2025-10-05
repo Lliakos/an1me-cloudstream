@@ -185,28 +185,22 @@ class An1meProvider : MainAPI() {
             when {
                 decodedUrl.endsWith(".m3u8") || decodedUrl.contains(".m3u8") -> {
                     // Direct M3U8 link
-                    callback.invoke(
-                        ExtractorLink(
-                            source = name,
-                            name = name,
-                            url = decodedUrl,
-                            referer = mainUrl,
-                            quality = Qualities.Unknown.value,
-                            isM3u8 = true
-                        )
-                    )
+                    M3u8Helper.generateM3u8(
+                        source = name,
+                        streamUrl = decodedUrl,
+                        referer = mainUrl
+                    ).forEach(callback)
                     true
                 }
                 decodedUrl.contains("googlevideo.com") || decodedUrl.contains("googleusercontent.com") -> {
-                    // Google Drive/Photos link
+                    // Google Drive/Photos link - direct video
                     callback.invoke(
                         ExtractorLink(
-                            source = name,
-                            name = "$name Google",
-                            url = decodedUrl,
-                            referer = "",
-                            quality = Qualities.Unknown.value,
-                            isM3u8 = false
+                            name,
+                            "$name Google",
+                            decodedUrl,
+                            "",
+                            Qualities.Unknown.value,
                         )
                     )
                     true
