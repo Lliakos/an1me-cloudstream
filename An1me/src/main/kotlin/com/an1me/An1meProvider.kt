@@ -23,7 +23,12 @@ class An1meProvider : MainAPI() {
             ?: this.selectFirst("img")?.attr("alt")
             ?: return null
         
-        val posterUrl = fixUrlNull(this.selectFirst("img")?.attr("src"))
+        // Try multiple poster sources
+        val posterUrl = fixUrlNull(
+            this.selectFirst("img")?.attr("data-src")
+                ?: this.selectFirst("img")?.attr("src")
+                ?: this.selectFirst("img")?.attr("data-lazy-src")
+        )
         
         return newAnimeSearchResponse(title, href, TvType.Anime) {
             this.posterUrl = posterUrl
@@ -38,15 +43,18 @@ class An1meProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = query.replace(" ", "+")
-        val document = app.get("$mainUrl/?s=$encodedQuery").document
+        val searchUrl = "$mainUrl/?s=$encodedQuery"
+        val document = app.get(searchUrl).document
         
         // Try multiple selectors for search results
         val selectors = listOf(
-            "li", 
+            "li",
             "div.anime-item", 
             "div.search-item",
             "div.item",
-            "article"
+            "article",
+            "div.post",
+            "div.result-item"
         )
         
         for (selector in selectors) {
@@ -66,45 +74,53 @@ class An1meProvider : MainAPI() {
             ?: document.selectFirst("h1")?.text()
             ?: "Unknown"
         
+        // Enhanced poster detection
         val poster = fixUrlNull(
-            document.selectFirst("div.anime-poster img")?.attr("src")
+            document.selectFirst("div.anime-poster img")?.attr("data-src")
+                ?: document.selectFirst("div.anime-poster img")?.attr("src")
+                ?: document.selectFirst("meta[property='og:image']")?.attr("content")
+                ?: document.selectFirst("img.wp-post-image")?.attr("data-src")
+                ?: document.selectFirst("img.wp-post-image")?.attr("src")
                 ?: document.selectFirst("img")?.attr("src")
         )
         
         val description = document.selectFirst("div.description")?.text()
+            ?: document.selectFirst("div.entry-content p")?.text()
             ?: document.selectFirst("div.entry-content")?.text()
         
-        // Enhanced episode detection with multiple selectors
+        // Enhanced episode detection - look for all episode links
         val episodes = ArrayList<Episode>()
         
-        // Try multiple selectors for episode lists
+        // Primary selectors for episode detection
         val episodeSelectors = listOf(
-            "a.episode-list-item",
-            "div.episodes-list a",
+            "div.entry-content a[href*='/watch/']",
+            "div.episodes-list a[href*='/watch/']",
+            "a.episode-link",
             "div.episode-list a",
-            "ul.episodes-list li a",
+            "ul.episodes li a",
             "div.episodes a",
-            "div.episode a"
+            "a[href*='/watch/']"
         )
         
         for (selector in episodeSelectors) {
             val foundEpisodes = document.select(selector).mapNotNull { ep ->
-                val episodeUrl = fixUrl(ep.attr("href"))
-                if (episodeUrl.isEmpty()) return@mapNotNull null
+                val episodeUrl = ep.attr("href")
+                if (episodeUrl.isNullOrEmpty() || !episodeUrl.contains("/watch/")) return@mapNotNull null
                 
-                // Try multiple ways to get episode number
-                val episodeNumber = ep.selectFirst("span.episode-list-item-number")?.text()?.trim()?.toIntOrNull()
-                    ?: ep.selectFirst("span.episode-number")?.text()?.trim()?.toIntOrNull()
-                    ?: ep.text().trim().replace("Episode", "").trim().toIntOrNull()
-                    ?: Regex("Episode\\s*(\\d+)").find(ep.text())?.groupValues?.get(1)?.toIntOrNull()
-                    ?: Regex("EP\\s*(\\d+)").find(ep.text())?.groupValues?.get(1)?.toIntOrNull()
-                    ?: 0
+                val fullUrl = fixUrl(episodeUrl)
                 
-                val episodeTitle = ep.selectFirst("span.episode-list-item-title")?.text()
-                    ?: ep.selectFirst("span.episode-title")?.text()
+                // Enhanced episode number extraction
+                val episodeText = ep.text()
+                val episodeNumber = ep.selectFirst("span.episode-number")?.text()?.trim()?.toIntOrNull()
+                    ?: Regex("(?:Episode|Επεισόδιο|EP)\\s*(\\d+)", RegexOption.IGNORE_CASE)
+                        .find(episodeText)?.groupValues?.get(1)?.toIntOrNull()
+                    ?: Regex("(\\d+)").find(episodeText)?.groupValues?.get(1)?.toIntOrNull()
+                    ?: 1
+                
+                val episodeTitle = ep.selectFirst("span.episode-title")?.text()
                     ?: "Episode $episodeNumber"
                 
-                newEpisode(episodeUrl) {
+                newEpisode(fullUrl) {
                     this.name = episodeTitle
                     this.episode = episodeNumber
                 }
@@ -116,22 +132,22 @@ class An1meProvider : MainAPI() {
             }
         }
         
-        // If no episodes found, create a dummy episode for testing
+        // Fallback: If no episodes found, try to find a single watch button
         if (episodes.isEmpty()) {
-            val watchUrl = document.selectFirst("a.watch-button")?.attr("href")
-                ?: document.selectFirst("a.btn-watch")?.attr("href")
-                ?: document.selectFirst("a[href*='/watch/']")?.attr("href")
-                
-            if (!watchUrl.isNullOrEmpty()) {
-                episodes.add(newEpisode(fixUrl(watchUrl)) {
-                    this.name = "Episode 1"
-                    this.episode = 1
-                })
+            val watchButton = document.selectFirst("a.watch-button, a.btn-watch, a[href*='/watch/']")
+            watchButton?.let {
+                val watchUrl = it.attr("href")
+                if (!watchUrl.isNullOrEmpty()) {
+                    episodes.add(newEpisode(fixUrl(watchUrl)) {
+                        this.name = "Episode 1"
+                        this.episode = 1
+                    })
+                }
             }
         }
         
-        // Sort episodes in descending order
-        val sortedEpisodes = episodes.sortedByDescending { it.episode }
+        // Sort episodes by number
+        val sortedEpisodes = episodes.distinctBy { it.data }.sortedBy { it.episode }
 
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = poster
@@ -147,13 +163,65 @@ class An1meProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val document = app.get(data).document
-        val iframe = document.selectFirst("iframe[src*='kr-video']")?.attr("src") ?: return false
-        val base64Part = iframe.substringAfter("/kr-video/").substringBefore("?")
+        
+        // Try to find iframe
+        val iframe = document.selectFirst("iframe[src*='kr-video']")?.attr("src")
+            ?: document.selectFirst("iframe")?.attr("src")
+            ?: return false
+        
+        // Extract base64 part from URL
+        val base64Part = when {
+            iframe.contains("/kr-video/") -> {
+                iframe.substringAfter("/kr-video/").substringBefore("?")
+            }
+            else -> return false
+        }
         
         return try {
+            // Decode base64
             val decodedUrl = String(Base64.getDecoder().decode(base64Part))
-            loadExtractor(decodedUrl, data, subtitleCallback, callback)
-            true
+            
+            // Handle different URL types
+            when {
+                decodedUrl.endsWith(".m3u8") || decodedUrl.contains(".m3u8") -> {
+                    // Direct M3U8 link
+                    callback.invoke(
+                        ExtractorLink(
+                            source = name,
+                            name = name,
+                            url = decodedUrl,
+                            referer = mainUrl,
+                            quality = Qualities.Unknown.value,
+                            isM3u8 = true
+                        )
+                    )
+                    true
+                }
+                decodedUrl.contains("googlevideo.com") || decodedUrl.contains("googleusercontent.com") -> {
+                    // Google Drive/Photos link
+                    callback.invoke(
+                        ExtractorLink(
+                            source = name,
+                            name = "$name Google",
+                            url = decodedUrl,
+                            referer = "",
+                            quality = Qualities.Unknown.value,
+                            isM3u8 = false
+                        )
+                    )
+                    true
+                }
+                decodedUrl.contains("wetransfer.com") -> {
+                    // WeTransfer link - try to extract direct link
+                    loadExtractor(decodedUrl, data, subtitleCallback, callback)
+                    true
+                }
+                else -> {
+                    // Try generic extractor
+                    loadExtractor(decodedUrl, data, subtitleCallback, callback)
+                    true
+                }
+            }
         } catch (e: Exception) {
             false
         }
