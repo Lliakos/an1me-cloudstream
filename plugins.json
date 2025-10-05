@@ -15,7 +15,7 @@
             "OVA"
         ],
         "version": 6,
-        "internalName": "An1meProvider",
+        "internalName": "An1me",
         "description": "Stream anime from An1me.to",
         "url": "https://raw.githubusercontent.com/Lliakos/an1me-cloudstream/builds/An1me.cs3",
         "name": "An1me"
