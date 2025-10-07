@@ -14,7 +14,7 @@ class An1meProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Anime)
 
     private fun log(msg: String) {
-        Log.d("An1me_Debug", msg)
+        Log.d("An1meProvider", msg)
     }
 
     private fun Element.toSearchResult(): AnimeSearchResponse? {
@@ -30,8 +30,6 @@ class An1meProvider : MainAPI() {
         
         val posterUrl = fixUrlNull(this.selectFirst("img")?.attr("src"))
         
-        log("Search result: $title -> $href")
-        
         return newAnimeSearchResponse(title, href, TvType.Anime) {
             this.posterUrl = posterUrl
         }
@@ -40,102 +38,100 @@ class An1meProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val document = app.get(mainUrl).document
         val items = document.select("li").mapNotNull { it.toSearchResult() }
-        log("Main page: Found ${items.size} items")
         return newHomePageResponse("Latest Anime", items)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        log("=== SEARCH DEBUG ===")
-        log("Search query: $query")
-        
-        val searchUrl = "$mainUrl/?s=$query"
-        log("Search URL: $searchUrl")
-        
-        val document = app.get(searchUrl).document
-        
-        // Debug: Print the HTML title and body length
-        log("Page title: ${document.title()}")
-        log("Body length: ${document.body().text().length}")
-        
-        // Try multiple selectors and log what we find
-        val selectors = listOf("li", "article", "div.anime-item", "div.post", "div[class*='anime']")
-        
-        for (selector in selectors) {
-            val elements = document.select(selector)
-            log("Selector '$selector' found ${elements.size} elements")
-            
-            if (elements.size > 0) {
-                // Log first element's HTML for inspection
-                log("First element HTML: ${elements.first()?.html()?.take(200)}")
-            }
-        }
-        
-        val results = document.select("li").mapNotNull { it.toSearchResult() }
-        log("Search results: ${results.size} items")
-        
-        return results
+        val document = app.get("$mainUrl/?s=$query").document
+        return document.select("li").mapNotNull { it.toSearchResult() }
     }
 
     override suspend fun load(url: String): LoadResponse {
-        log("=== LOAD DEBUG ===")
-        log("Loading URL: $url")
-        
+        log("Loading: $url")
         val document = app.get(url).document
         
         val title = document.selectFirst("h1.entry-title, h1")?.text() ?: "Unknown"
         log("Title: $title")
         
         val poster = fixUrlNull(document.selectFirst("img")?.attr("src"))
-        log("Poster: $poster")
         
         val description = document.selectFirst("div[data-synopsis]")?.text()
-        log("Description length: ${description?.length ?: 0}")
         
-        // DEBUG GENRES
-        log("--- Genre Debug ---")
-        val genreLinks = document.select("a[href*='/genre/']")
-        log("Found ${genreLinks.size} genre links")
-        genreLinks.take(5).forEach { link ->
-            log("Genre link: ${link.attr("href")} -> ${link.text()}")
-        }
-        val tags = genreLinks.map { it.text().trim() }.filter { it.isNotEmpty() }
-        log("Final tags: $tags")
+        // Fix genres selector - should be /genre/ not /genres/
+        val tags = document.select("a[href*='/genre/']").map { it.text().trim() }
+        log("Genres found: ${tags.size}")
         
-        // DEBUG EPISODES
-        log("--- Episode Debug ---")
-        val swiperEpisodes = document.select("div.swiper-slide a[href*='/watch/']")
-        log("Swiper episodes found: ${swiperEpisodes.size}")
+        // Try to get anime ID from URL or page data to fetch ALL episodes
+        val animeSlug = url.substringAfterLast("/anime/").substringBefore("/")
+        log("Anime slug: $animeSlug")
         
-        val allWatchLinks = document.select("a[href*='/watch/']")
-        log("Total watch links on page: ${allWatchLinks.size}")
+        val episodes = ArrayList<Episode>()
         
-        // Log first 3 episode links
-        swiperEpisodes.take(3).forEach { ep ->
-            log("Episode: ${ep.attr("href")} | Title: ${ep.attr("title")}")
-        }
-        
-        val episodes = swiperEpisodes.mapNotNull { ep ->
-            val episodeUrl = fixUrl(ep.attr("href"))
-            if (episodeUrl.isEmpty()) return@mapNotNull null
+        // Method 1: Try to get episodes from API (check if there's a JSON endpoint)
+        try {
+            val apiUrl = "$mainUrl/wp-json/kiranime/v1/anime/episodes/$animeSlug"
+            log("Trying API: $apiUrl")
+            val apiResponse = app.get(apiUrl).parsedSafe<EpisodesApiResponse>()
             
-            val episodeTitle = ep.attr("title")
-            val episodeNumber = Regex("Episode\\s*(\\d+)", RegexOption.IGNORE_CASE)
-                .find(episodeTitle)?.groupValues?.get(1)?.toIntOrNull()
-                ?: 1
-            
-            newEpisode(episodeUrl) {
-                this.name = "Episode $episodeNumber"
-                this.episode = episodeNumber
+            apiResponse?.episodes?.forEach { ep ->
+                val episodeUrl = fixUrl("/watch/${ep.slug}/")
+                episodes.add(newEpisode(episodeUrl) {
+                    this.name = "Episode ${ep.number}"
+                    this.episode = ep.number
+                })
             }
-        }.sortedBy { it.episode }
+            log("API method: Found ${episodes.size} episodes")
+        } catch (e: Exception) {
+            log("API method failed: ${e.message}")
+        }
         
-        log("Total episodes: ${episodes.size}")
+        // Method 2: If API fails, scrape from page
+        if (episodes.isEmpty()) {
+            val swiperEpisodes = document.select("div.swiper-slide a[href*='/watch/'], a[href*='/watch/'][title*='Episode']")
+            log("Swiper method: Found ${swiperEpisodes.size} episodes")
+            
+            swiperEpisodes.forEach { ep ->
+                val episodeUrl = fixUrl(ep.attr("href"))
+                if (episodeUrl.isNotEmpty()) {
+                    val episodeTitle = ep.attr("title")
+                    val episodeNumber = Regex("Episode\\s*(\\d+)", RegexOption.IGNORE_CASE)
+                        .find(episodeTitle)?.groupValues?.get(1)?.toIntOrNull()
+                        ?: episodes.size + 1
+                    
+                    episodes.add(newEpisode(episodeUrl) {
+                        this.name = "Episode $episodeNumber"
+                        this.episode = episodeNumber
+                    })
+                }
+            }
+        }
+        
+        // Method 3: Look for a "Load More" button or pagination for episodes
+        if (episodes.isEmpty()) {
+            document.select("a[href*='/watch/']").forEach { ep ->
+                val episodeUrl = ep.attr("href")
+                if (episodeUrl.isNotEmpty() && !episodeUrl.contains("/anime/")) {
+                    val fullUrl = fixUrl(episodeUrl)
+                    val episodeNumber = Regex("\\d+").findAll(ep.text()).lastOrNull()?.value?.toIntOrNull()
+                        ?: episodes.size + 1
+                    
+                    episodes.add(newEpisode(fullUrl) {
+                        this.name = "Episode $episodeNumber"
+                        this.episode = episodeNumber
+                    })
+                }
+            }
+            log("Fallback method: Found ${episodes.size} episodes")
+        }
+        
+        val sortedEpisodes = episodes.distinctBy { it.data }.sortedBy { it.episode }
+        log("Total unique episodes: ${sortedEpisodes.size}")
 
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = poster
             this.plot = description
             this.tags = tags
-            addEpisodes(DubStatus.Subbed, episodes)
+            addEpisodes(DubStatus.Subbed, sortedEpisodes)
         }
     }
 
@@ -145,28 +141,20 @@ class An1meProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        log("=== LOADLINKS DEBUG ===")
-        log("Episode URL: $data")
+        log("Loading video for: $data")
         
         val document = app.get(data).document
         
-        // Debug: Check all iframes
-        val allIframes = document.select("iframe")
-        log("Total iframes on page: ${allIframes.size}")
-        allIframes.forEach { iframe ->
-            log("Iframe src: ${iframe.attr("src")}")
-        }
-        
         val iframe = document.selectFirst("iframe[src*='kr-video']")?.attr("src")
         if (iframe.isNullOrEmpty()) {
-            log("ERROR: No kr-video iframe found!")
+            log("No kr-video iframe found")
             return false
         }
         
-        log("Kr-video iframe: $iframe")
+        log("Iframe found: $iframe")
         
         val base64Part = iframe.substringAfter("/kr-video/").substringBefore("?")
-        log("Base64 extracted: ${base64Part.take(50)}...")
+        log("Base64 part: $base64Part")
         
         return try {
             val decodedUrl = String(Base64.getDecoder().decode(base64Part))
@@ -174,30 +162,38 @@ class An1meProvider : MainAPI() {
             
             when {
                 decodedUrl.contains(".m3u8") -> {
-                    log("M3U8 detected - using M3u8Helper")
-                    val links = M3u8Helper.generateM3u8(
+                    log("Processing M3U8 stream")
+                    M3u8Helper.generateM3u8(
                         source = name,
                         streamUrl = decodedUrl,
                         referer = mainUrl
-                    )
-                    log("M3U8 generated ${links.size} links")
-                    links.forEach { link ->
-                        log("Link: ${link.name} | Quality: ${link.quality} | URL: ${link.url.take(50)}")
+                    ).forEach { link ->
+                        log("Adding M3U8 link: ${link.name} - ${link.quality}")
                         callback(link)
                     }
                     true
                 }
                 else -> {
-                    log("Non-M3U8 URL - using loadExtractor")
+                    log("Using generic extractor for: $decodedUrl")
                     val result = loadExtractor(decodedUrl, data, subtitleCallback, callback)
-                    log("LoadExtractor result: $result")
+                    log("Extractor result: $result")
                     result
                 }
             }
         } catch (e: Exception) {
-            log("EXCEPTION: ${e.message}")
-            log("Stack trace: ${e.stackTraceToString()}")
+            log("Error in loadLinks: ${e.message}")
+            e.printStackTrace()
             false
         }
     }
+    
+    // Data classes for API responses
+    data class EpisodesApiResponse(
+        val episodes: List<EpisodeData>?
+    )
+    
+    data class EpisodeData(
+        val number: Int,
+        val slug: String
+    )
 }
