@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import java.util.Base64
+import com.fasterxml.jackson.annotation.JsonProperty
 
 class An1meProvider : MainAPI() {
     override var mainUrl = "https://an1me.to"
@@ -37,30 +38,28 @@ class An1meProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        // The site uses /search/?s_keyword= instead of /?s=
-        val searchUrl = "$mainUrl/search/?s_keyword=${query.replace(" ", "+")}"
+        // The site uses a JavaScript-loaded search system
+        // Results are embedded in the page as JSON in a script tag
+        val searchUrl = "$mainUrl/search/?s_keyword=$query"
         val document = app.get(searchUrl).document
         
-        // Try different selectors for search results
-        val selectors = listOf(
-            "li",
-            "article",
-            "div.anime-card",
-            "div.anime-item",
-            "div.post",
-            "div[class*='anime']",
-            "div[class*='item']",
-            "a[href*='/anime/']"
-        )
-        
-        for (selector in selectors) {
-            val results = document.select(selector).mapNotNull { it.toSearchResult() }
-            if (results.isNotEmpty()) {
-                return results
+        // Try to parse results from the rendered HTML first
+        val results = document.select("#first_load_result > div").mapNotNull { item ->
+            val link = item.selectFirst("a[href*='/anime/']") ?: return@mapNotNull null
+            val href = fixUrl(link.attr("href"))
+            
+            val enTitle = item.selectFirst("span[data-en-title]")?.text()
+            val ntTitle = item.selectFirst("span[data-nt-title]")?.text()
+            val title = enTitle ?: ntTitle ?: return@mapNotNull null
+            
+            val posterUrl = fixUrlNull(item.selectFirst("img")?.attr("src"))
+            
+            newAnimeSearchResponse(title, href, TvType.Anime) {
+                this.posterUrl = posterUrl
             }
         }
         
-        return emptyList()
+        return results
     }
 
     override suspend fun load(url: String): LoadResponse {
@@ -73,14 +72,14 @@ class An1meProvider : MainAPI() {
         // Get genres
         val tags = document.select("a[href*='/genre/']").map { it.text().trim() }
         
-        // Get episodes
-        val episodes = document.select("div.swiper-slide a[href*='/watch/']").mapNotNull { ep ->
+        // Get episodes from swiper
+        val episodes = document.select("div.swiper-slide a[href*='/watch/'], a[href*='/watch/'][class*='anime']").mapNotNull { ep ->
             val episodeUrl = fixUrl(ep.attr("href"))
-            if (episodeUrl.isEmpty()) return@mapNotNull null
+            if (episodeUrl.isEmpty() || episodeUrl.contains("/anime/")) return@mapNotNull null
             
             val episodeTitle = ep.attr("title")
-            val episodeNumber = Regex("Episode\\s*(\\d+)", RegexOption.IGNORE_CASE)
-                .find(episodeTitle)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+            val episodeNumber = Regex("Episode\\s*(\\d+)|E\\s*(\\d+)", RegexOption.IGNORE_CASE)
+                .find(episodeTitle)?.groupValues?.filterNot { it.isEmpty() }?.lastOrNull()?.toIntOrNull() ?: 1
             
             newEpisode(episodeUrl) {
                 this.name = "Episode $episodeNumber"
@@ -122,73 +121,35 @@ class An1meProvider : MainAPI() {
                     true
                 }
                 
-                // WeTransfer link
+                // WeTransfer link - needs special handling
                 decodedUrl.contains("wetransfer.com") -> {
-                    extractWeTransfer(decodedUrl, callback)
+                    // WeTransfer links don't work directly in players
+                    // Try to extract the actual file if possible
+                    try {
+                        val wetransferDoc = app.get(decodedUrl).document
+                        // Look for direct download links
+                        val downloadLinks = wetransferDoc.select("a[href*='download']")
+                        downloadLinks.forEach { link ->
+                            val downloadUrl = link.attr("href")
+                            if (downloadUrl.isNotEmpty() && downloadUrl.startsWith("http")) {
+                                M3u8Helper.generateM3u8(
+                                    source = name,
+                                    streamUrl = downloadUrl,
+                                    referer = decodedUrl
+                                ).forEach(callback)
+                            }
+                        }
+                        true
+                    } catch (e: Exception) {
+                        false
+                    }
                 }
                 
-                // Google Drive/Photos
-                decodedUrl.contains("googlevideo.com") || decodedUrl.contains("googleusercontent.com") -> {
-                    loadExtractor(decodedUrl, data, subtitleCallback, callback)
-                    true
-                }
-                
-                // Try generic extractor for other sources
+                // Google Drive/Photos or other sources
                 else -> {
                     loadExtractor(decodedUrl, data, subtitleCallback, callback)
                 }
             }
-        } catch (e: Exception) {
-            false
-        }
-    }
-    
-    private suspend fun extractWeTransfer(url: String, callback: (ExtractorLink) -> Unit): Boolean {
-        return try {
-            // Fetch the WeTransfer page
-            val doc = app.get(url).document
-            
-            // Look for download links in the page
-            // WeTransfer boards have files listed with download buttons
-            val downloadLinks = doc.select("a[href*='download'], button[data-url]")
-            
-            downloadLinks.forEach { link ->
-                val downloadUrl = link.attr("href").ifEmpty { link.attr("data-url") }
-                if (downloadUrl.isNotEmpty()) {
-                    callback.invoke(
-                        ExtractorLink(
-                            name,
-                            "WeTransfer",
-                            downloadUrl,
-                            url,
-                            Qualities.Unknown.value,
-                        )
-                    )
-                }
-            }
-            
-            // Alternative: Look for file info in JSON/scripts
-            val scripts = doc.select("script:containsData(files)")
-            scripts.forEach { script ->
-                val scriptText = script.data()
-                // Try to extract file URLs from JavaScript
-                Regex("\"url\"\\s*:\\s*\"([^\"]+)\"").findAll(scriptText).forEach { match ->
-                    val fileUrl = match.groupValues[1]
-                    if (fileUrl.contains("http") && !fileUrl.contains("wetransfer.com")) {
-                        callback.invoke(
-                            ExtractorLink(
-                                name,
-                                "WeTransfer File",
-                                fileUrl,
-                                url,
-                                Qualities.Unknown.value,
-                            )
-                        )
-                    }
-                }
-            }
-            
-            true
         } catch (e: Exception) {
             false
         }
