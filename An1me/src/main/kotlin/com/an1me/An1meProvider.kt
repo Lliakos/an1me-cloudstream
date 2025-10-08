@@ -37,8 +37,30 @@ class An1meProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.get("$mainUrl/?s=$query").document
-        return document.select("li").mapNotNull { it.toSearchResult() }
+        // The site uses /search/?s_keyword= instead of /?s=
+        val searchUrl = "$mainUrl/search/?s_keyword=${query.replace(" ", "+")}"
+        val document = app.get(searchUrl).document
+        
+        // Try different selectors for search results
+        val selectors = listOf(
+            "li",
+            "article",
+            "div.anime-card",
+            "div.anime-item",
+            "div.post",
+            "div[class*='anime']",
+            "div[class*='item']",
+            "a[href*='/anime/']"
+        )
+        
+        for (selector in selectors) {
+            val results = document.select(selector).mapNotNull { it.toSearchResult() }
+            if (results.isNotEmpty()) {
+                return results
+            }
+        }
+        
+        return emptyList()
     }
 
     override suspend fun load(url: String): LoadResponse {
@@ -48,10 +70,10 @@ class An1meProvider : MainAPI() {
         val poster = fixUrlNull(document.selectFirst("img")?.attr("src"))
         val description = document.selectFirst("div[data-synopsis]")?.text()
         
-        // Get genres from links containing /genre/
+        // Get genres
         val tags = document.select("a[href*='/genre/']").map { it.text().trim() }
         
-        // Get episodes from swiper carousel
+        // Get episodes
         val episodes = document.select("div.swiper-slide a[href*='/watch/']").mapNotNull { ep ->
             val episodeUrl = fixUrl(ep.attr("href"))
             if (episodeUrl.isEmpty()) return@mapNotNull null
@@ -81,39 +103,94 @@ class An1meProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val document = app.get(data).document
-        
-        // Get iframe src
         val iframeSrc = document.selectFirst("iframe[src*='kr-video']")?.attr("src") ?: return false
         
-        // Extract base64 part (between /kr-video/ and ?)
-        val base64Part = iframeSrc
-            .substringAfter("/kr-video/")
-            .substringBefore("?")
-        
+        val base64Part = iframeSrc.substringAfter("/kr-video/").substringBefore("?")
         if (base64Part.isEmpty()) return false
         
         return try {
-            // Decode base64
             val decodedUrl = String(Base64.getDecoder().decode(base64Part))
             
-            if (decodedUrl.isEmpty()) return false
+            when {
+                // Direct M3U8 file
+                decodedUrl.endsWith(".m3u8") -> {
+                    M3u8Helper.generateM3u8(
+                        source = name,
+                        streamUrl = decodedUrl,
+                        referer = mainUrl
+                    ).forEach(callback)
+                    true
+                }
+                
+                // WeTransfer link
+                decodedUrl.contains("wetransfer.com") -> {
+                    extractWeTransfer(decodedUrl, callback)
+                }
+                
+                // Google Drive/Photos
+                decodedUrl.contains("googlevideo.com") || decodedUrl.contains("googleusercontent.com") -> {
+                    loadExtractor(decodedUrl, data, subtitleCallback, callback)
+                    true
+                }
+                
+                // Try generic extractor for other sources
+                else -> {
+                    loadExtractor(decodedUrl, data, subtitleCallback, callback)
+                }
+            }
+        } catch (e: Exception) {
+            false
+        }
+    }
+    
+    private suspend fun extractWeTransfer(url: String, callback: (ExtractorLink) -> Unit): Boolean {
+        return try {
+            // Fetch the WeTransfer page
+            val doc = app.get(url).document
             
-            // Add the M3U8 link directly
-            M3u8Helper.generateM3u8(
-                source = name,
-                streamUrl = decodedUrl,
-                referer = mainUrl
-            ).forEach(callback)
+            // Look for download links in the page
+            // WeTransfer boards have files listed with download buttons
+            val downloadLinks = doc.select("a[href*='download'], button[data-url]")
+            
+            downloadLinks.forEach { link ->
+                val downloadUrl = link.attr("href").ifEmpty { link.attr("data-url") }
+                if (downloadUrl.isNotEmpty()) {
+                    callback.invoke(
+                        ExtractorLink(
+                            name,
+                            "WeTransfer",
+                            downloadUrl,
+                            url,
+                            Qualities.Unknown.value,
+                        )
+                    )
+                }
+            }
+            
+            // Alternative: Look for file info in JSON/scripts
+            val scripts = doc.select("script:containsData(files)")
+            scripts.forEach { script ->
+                val scriptText = script.data()
+                // Try to extract file URLs from JavaScript
+                Regex("\"url\"\\s*:\\s*\"([^\"]+)\"").findAll(scriptText).forEach { match ->
+                    val fileUrl = match.groupValues[1]
+                    if (fileUrl.contains("http") && !fileUrl.contains("wetransfer.com")) {
+                        callback.invoke(
+                            ExtractorLink(
+                                name,
+                                "WeTransfer File",
+                                fileUrl,
+                                url,
+                                Qualities.Unknown.value,
+                            )
+                        )
+                    }
+                }
+            }
             
             true
         } catch (e: Exception) {
-            // If M3u8Helper fails, try loadExtractor
-            try {
-                val decodedUrl = String(Base64.getDecoder().decode(base64Part))
-                loadExtractor(decodedUrl, data, subtitleCallback, callback)
-            } catch (e2: Exception) {
-                false
-            }
+            false
         }
     }
 }
