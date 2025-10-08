@@ -4,7 +4,6 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import java.util.Base64
-import com.fasterxml.jackson.annotation.JsonProperty
 
 class An1meProvider : MainAPI() {
     override var mainUrl = "https://an1me.to"
@@ -38,12 +37,9 @@ class An1meProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        // The site uses a JavaScript-loaded search system
-        // Results are embedded in the page as JSON in a script tag
         val searchUrl = "$mainUrl/search/?s_keyword=$query"
         val document = app.get(searchUrl).document
         
-        // Try to parse results from the rendered HTML first
         val results = document.select("#first_load_result > div").mapNotNull { item ->
             val link = item.selectFirst("a[href*='/anime/']") ?: return@mapNotNull null
             val href = fixUrl(link.attr("href"))
@@ -69,8 +65,11 @@ class An1meProvider : MainAPI() {
         val poster = fixUrlNull(document.selectFirst("img")?.attr("src"))
         val description = document.selectFirst("div[data-synopsis]")?.text()
         
-        // Get genres
-        val tags = document.select("a[href*='/genre/']").map { it.text().trim() }
+        // Get genres - only from the anime page itself, not from the sidebar
+        // Look for genre links that are inside the anime details section
+        val tags = document.select("li:has(span:containsOwn(Είδος:)) a[href*='/genre/']").map { 
+            it.text().trim() 
+        }
         
         // Get episodes from swiper
         val episodes = document.select("div.swiper-slide a[href*='/watch/'], a[href*='/watch/'][class*='anime']").mapNotNull { ep ->
@@ -101,57 +100,43 @@ class An1meProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data).document
-        val iframeSrc = document.selectFirst("iframe[src*='kr-video']")?.attr("src") ?: return false
-        
-        val base64Part = iframeSrc.substringAfter("/kr-video/").substringBefore("?")
-        if (base64Part.isEmpty()) return false
-        
-        return try {
+        try {
+            val document = app.get(data).document
+            val iframeSrc = document.selectFirst("iframe[src*='kr-video']")?.attr("src")
+            
+            if (iframeSrc.isNullOrEmpty()) return false
+            
+            val base64Part = iframeSrc.substringAfter("/kr-video/").substringBefore("?")
+            if (base64Part.isEmpty()) return false
+            
             val decodedUrl = String(Base64.getDecoder().decode(base64Part))
             
             when {
-                // Direct M3U8 file
-                decodedUrl.endsWith(".m3u8") -> {
+                // Direct M3U8 file - this should work
+                decodedUrl.contains(".m3u8") -> {
                     M3u8Helper.generateM3u8(
                         source = name,
                         streamUrl = decodedUrl,
                         referer = mainUrl
                     ).forEach(callback)
-                    true
+                    return true
                 }
                 
-                // WeTransfer link - needs special handling
+                // WeTransfer - these won't work for streaming
                 decodedUrl.contains("wetransfer.com") -> {
-                    // WeTransfer links don't work directly in players
-                    // Try to extract the actual file if possible
-                    try {
-                        val wetransferDoc = app.get(decodedUrl).document
-                        // Look for direct download links
-                        val downloadLinks = wetransferDoc.select("a[href*='download']")
-                        downloadLinks.forEach { link ->
-                            val downloadUrl = link.attr("href")
-                            if (downloadUrl.isNotEmpty() && downloadUrl.startsWith("http")) {
-                                M3u8Helper.generateM3u8(
-                                    source = name,
-                                    streamUrl = downloadUrl,
-                                    referer = decodedUrl
-                                ).forEach(callback)
-                            }
-                        }
-                        true
-                    } catch (e: Exception) {
-                        false
-                    }
+                    // WeTransfer files need to be downloaded, can't be streamed directly
+                    // Return false so the episode shows "No links found"
+                    return false
                 }
                 
-                // Google Drive/Photos or other sources
+                // Try other extractors for Google Drive, etc.
                 else -> {
-                    loadExtractor(decodedUrl, data, subtitleCallback, callback)
+                    return loadExtractor(decodedUrl, data, subtitleCallback, callback)
                 }
             }
         } catch (e: Exception) {
-            false
+            // If anything fails, return false so Cloudstream knows there's no video
+            return false
         }
     }
 }
