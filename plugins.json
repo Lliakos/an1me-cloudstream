@@ -3,7 +3,7 @@
         "iconUrl": "https://an1me.to/favicon.ico",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Lliakos/an1me-cloudstream",
-        "fileSize": 10905,
+        "fileSize": 12563,
         "status": 1,
         "language": "gr",
         "authors": [
@@ -14,7 +14,7 @@
             "AnimeMovie",
             "OVA"
         ],
-        "version": 16,
+        "version": 17,
         "internalName": "An1me",
         "description": "Stream anime from An1me.to",
         "url": "https://raw.githubusercontent.com/Lliakos/an1me-cloudstream/builds/An1me.cs3",
