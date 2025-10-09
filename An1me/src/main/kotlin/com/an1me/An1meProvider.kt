@@ -109,33 +109,58 @@ class An1meProvider : MainAPI() {
             val base64Part = iframeSrc.substringAfter("/kr-video/").substringBefore("?")
             if (base64Part.isEmpty()) return false
             
-            val decodedUrl = String(Base64.getDecoder().decode(base64Part))
+            // Step 1: Decode the base64 to get the iframe URL
+            val iframeUrl = String(Base64.getDecoder().decode(base64Part))
+            
+            // Step 2: Load the iframe page itself
+            val iframeDoc = app.get(iframeUrl).document
+            
+            // Step 3: Extract video sources from the JavaScript in the iframe
+            // Look for: const params = {"sources":[{"url":"..."}]}
+            val scriptText = iframeDoc.select("script").firstOrNull { 
+                it.data().contains("const params") || it.data().contains("sources") 
+            }?.data() ?: return false
+            
+            // Extract the sources array from JavaScript
+            val sourcesRegex = """"sources"\s*:\s*\[\s*\{\s*"url"\s*:\s*"([^"]+)"""".toRegex()
+            val match = sourcesRegex.find(scriptText) ?: return false
+            
+            val videoUrl = match.groupValues[1]
+                .replace("\\/", "/")  // Unescape slashes
+                .replace("\\", "")     // Remove any other escapes
             
             when {
-                // Direct M3U8 file - this should work
-                decodedUrl.contains(".m3u8") -> {
+                // M3U8 files work perfectly
+                videoUrl.contains(".m3u8") -> {
                     M3u8Helper.generateM3u8(
                         source = name,
-                        streamUrl = decodedUrl,
-                        referer = mainUrl
+                        streamUrl = videoUrl,
+                        referer = iframeUrl
                     ).forEach(callback)
                     return true
                 }
                 
-                // WeTransfer - these won't work for streaming
-                decodedUrl.contains("wetransfer.com") -> {
-                    // WeTransfer files need to be downloaded, can't be streamed directly
-                    // Return false so the episode shows "No links found"
-                    return false
+                // WeTransfer direct download links - might work
+                videoUrl.contains("download.wetransfer.com") -> {
+                    M3u8Helper.generateM3u8(
+                        source = name,
+                        streamUrl = videoUrl,
+                        referer = iframeUrl
+                    ).forEach(callback)
+                    return true
                 }
                 
-                // Try other extractors for Google Drive, etc.
+                // Google Drive/Photos links
+                videoUrl.contains("googlevideo.com") || videoUrl.contains("googleusercontent.com") -> {
+                    return loadExtractor(videoUrl, iframeUrl, subtitleCallback, callback)
+                }
+                
+                // Any other video URL
                 else -> {
-                    return loadExtractor(decodedUrl, data, subtitleCallback, callback)
+                    return loadExtractor(videoUrl, iframeUrl, subtitleCallback, callback)
                 }
             }
         } catch (e: Exception) {
-            // If anything fails, return false so Cloudstream knows there's no video
             return false
         }
     }
