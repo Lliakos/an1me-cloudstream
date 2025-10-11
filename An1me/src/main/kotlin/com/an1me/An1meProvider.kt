@@ -4,6 +4,8 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import java.util.Base64
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 
 @Suppress("DEPRECATION")
 class An1meProvider : MainAPI() {
@@ -13,6 +15,7 @@ class An1meProvider : MainAPI() {
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Anime)
 
+    // Helper suspend function to safely create extractor links
     private suspend fun createLink(
         sourceName: String,
         linkName: String,
@@ -109,6 +112,10 @@ class An1meProvider : MainAPI() {
         }
     }
 
+    /**
+     * Core function: handle an1me.to links, decode base64,
+     * support WeTransfer and inner iframe extraction.
+     */
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -130,62 +137,79 @@ class An1meProvider : MainAPI() {
             val decodedUrl = String(Base64.getDecoder().decode(base64Part))
             android.util.Log.d("An1me_Video", "Decoded URL: $decodedUrl")
 
-            // If direct M3U8
-            if (decodedUrl.contains(".m3u8")) return handleM3u8(decodedUrl, callback)
+            // If m3u8 directly
+            if (decodedUrl.contains(".m3u8")) {
+                return handleM3u8(decodedUrl, callback)
+            }
 
-            val pagesToScan = mutableListOf<Pair<String, String>>() // Pair<pageUrl, referer>
+            // Handle WeTransfer boards
+            if (decodedUrl.contains("wetransfer.com")) {
+                android.util.Log.d("An1me_Video", "Detected WeTransfer link, attempting extraction...")
+                val weDoc = app.get(decodedUrl).document
+                val nestedIframe = weDoc.selectFirst("iframe")?.attr("src")
+                val finalUrl = nestedIframe ?: decodedUrl
+                val finalDoc = app.get(finalUrl).document
+                val videoSources = finalDoc.select("video source[src]").map { it.attr("src") }
+
+                if (videoSources.isNotEmpty()) {
+                    videoSources.forEach { videoUrl ->
+                        callback(
+                            createLink(
+                                sourceName = name,
+                                linkName = "$name (WeTransfer)",
+                                url = fixUrl(videoUrl),
+                                referer = decodedUrl,
+                                quality = Qualities.Unknown.value,
+                                type = ExtractorLinkType.VIDEO
+                            )
+                        )
+                    }
+                    return true
+                } else {
+                    android.util.Log.d("An1me_Video", "No MP4 found in WeTransfer page")
+                }
+            }
+
+            // Scan decodedUrl and inner iframe if any
+            val pagesToScan = mutableListOf<Pair<String, String>>()
             pagesToScan.add(Pair(decodedUrl, mainUrl))
 
-            // Fetch decoded page and check iframe inside
             try {
                 val decodedDoc = app.get(decodedUrl, referer = mainUrl).document
-                val innerIframe = decodedDoc.selectFirst("iframe")
-                if (innerIframe != null) {
-                    val innerSrc = innerIframe.attr("src")
-                    if (innerSrc.isNotEmpty()) {
-                        val resolved = if (innerSrc.startsWith("http")) innerSrc else fixUrl(innerSrc)
-                        android.util.Log.d("An1me_Video", "Found inner iframe, following: $resolved")
-                        pagesToScan.add(Pair(resolved, decodedUrl))
-                    }
+                val innerIframe = decodedDoc.selectFirst("iframe")?.attr("src")
+                if (!innerIframe.isNullOrEmpty()) {
+                    val resolved = if (innerIframe.startsWith("http")) innerIframe else fixUrl(innerIframe)
+                    android.util.Log.d("An1me_Video", "Found inner iframe, following: $resolved")
+                    pagesToScan.add(Pair(resolved, decodedUrl))
                 }
             } catch (e: Exception) {
-                android.util.Log.d("An1me_Video", "Failed to fetch decodedUrl page: ${e.message}")
+                android.util.Log.d("An1me_Video", "Failed to fetch decoded page: ${e.message}")
             }
 
             var foundAny = false
-
             for ((pageUrl, referer) in pagesToScan) {
-                android.util.Log.d("An1me_Video", "Scanning page: $pageUrl (referer: $referer)")
-                val pageText = try { app.get(pageUrl, referer = referer).text } catch (e: Exception) { continue }
+                val pageText = try {
+                    app.get(pageUrl, referer = referer).text
+                } catch (e: Exception) {
+                    android.util.Log.d("An1me_Video", "Failed to get page: ${e.message}")
+                    continue
+                }
 
-                // Google Photos
-                val gg = Regex("https://video\\.googleusercontent\\.com/[^\"'\\s]+").find(pageText)?.value
-                if (gg != null) {
-                    android.util.Log.d("An1me_Video", "Found Google Photos video: $gg")
-                    callback.invoke(createLink(name, "$name (Google Photos)", gg, pageUrl, Qualities.Unknown.value, ExtractorLinkType.MP4))
+                // Googleusercontent
+                Regex("https://video\\.googleusercontent\\.com/[^\"'\\s]+").find(pageText)?.value?.let { gg ->
+                    callback(createLink(name, "$name (Google Photos)", gg, pageUrl, Qualities.Unknown.value, ExtractorLinkType.VIDEO))
                     foundAny = true
                 }
 
-                // Direct MP4
-                val mp4 = Regex("https?://[^\"'\\s]+\\.mp4[^\"'\\s]*").find(pageText)?.value
-                if (mp4 != null) {
-                    android.util.Log.d("An1me_Video", "Found direct mp4: $mp4")
-                    callback.invoke(createLink(name, "$name (MP4)", mp4, pageUrl, Qualities.Unknown.value, ExtractorLinkType.MP4))
+                // MP4
+                Regex("https?://[^\"'\\s]+\\.mp4[^\"'\\s]*").find(pageText)?.value?.let { mp4 ->
+                    callback(createLink(name, "$name (MP4)", mp4, pageUrl, Qualities.Unknown.value, ExtractorLinkType.VIDEO))
                     foundAny = true
                 }
 
-                // M3U8 links
-                val m3u8 = Regex("https?://[^\"'\\s]+\\.m3u8[^\"'\\s]*").find(pageText)?.value
-                if (m3u8 != null && handleM3u8(m3u8, callback)) foundAny = true
-
-                // WeTransfer detection
-                if (pageText.contains("wetransfer.com/board")) {
-                    android.util.Log.d("An1me_Video", "Detected WeTransfer link, attempting extraction...")
-                    val wtMp4 = Regex("https?://[^\"'\\s]+\\.mp4").find(pageText)?.value
-                    if (wtMp4 != null) {
-                        callback.invoke(createLink(name, "$name (WeTransfer)", wtMp4, pageUrl, Qualities.Unknown.value, ExtractorLinkType.MP4))
-                        foundAny = true
-                    }
+                // M3U8
+                Regex("https?://[^\"'\\s]+\\.m3u8[^\"'\\s]*").find(pageText)?.value?.let { m3u8 ->
+                    if (handleM3u8(m3u8, callback)) foundAny = true
                 }
             }
 
@@ -198,15 +222,14 @@ class An1meProvider : MainAPI() {
 
     private suspend fun handleM3u8(videoUrl: String, callback: (ExtractorLink) -> Unit): Boolean {
         try {
-            val m3u8Response = app.get(videoUrl).text
-            val lines = m3u8Response.lines()
+            val response = app.get(videoUrl).text
+            val lines = response.lines()
             var foundVariant = false
 
-            lines.forEachIndexed { index, line ->
+            lines.forEachIndexed { i, line ->
                 if (line.startsWith("#EXT-X-STREAM-INF")) {
-                    val resolutionMatch = """RESOLUTION=\d+x(\d+)""".toRegex().find(line)
-                    val height = resolutionMatch?.groupValues?.get(1)?.toIntOrNull()
-                    val currentQuality = when (height) {
+                    val height = """RESOLUTION=\d+x(\d+)""".toRegex().find(line)?.groupValues?.get(1)?.toIntOrNull()
+                    val quality = when (height) {
                         2160 -> Qualities.P2160.value
                         1440 -> Qualities.P1440.value
                         1080 -> Qualities.P1080.value
@@ -215,30 +238,18 @@ class An1meProvider : MainAPI() {
                         360 -> Qualities.P360.value
                         else -> Qualities.Unknown.value
                     }
-                    val currentName = if (height != null) "${height}p" else "Unknown"
-
-                    if (index + 1 < lines.size) {
-                        val urlLine = lines[index + 1]
-                        if (!urlLine.startsWith("#")) {
-                            val fullUrl = if (urlLine.startsWith("http")) urlLine else {
-                                val baseUrl = videoUrl.substringBeforeLast("/")
-                                "$baseUrl/$urlLine"
-                            }
-                            val safeUrl = fullUrl.replace(" ", "%20").replace("[", "%5B").replace("]", "%5D")
-                            android.util.Log.d("An1me_Video", "Adding variant: $currentName -> $safeUrl")
-                            callback.invoke(createLink(name, "$name $currentName", safeUrl, mainUrl, currentQuality, ExtractorLinkType.M3U8))
-                            foundVariant = true
-                        }
+                    if (i + 1 < lines.size && !lines[i + 1].startsWith("#")) {
+                        val sub = lines[i + 1]
+                        val final = if (sub.startsWith("http")) sub else videoUrl.substringBeforeLast("/") + "/" + sub
+                        callback(createLink(name, "$name ${height ?: "?"}p", final, mainUrl, quality, ExtractorLinkType.M3U8))
+                        foundVariant = true
                     }
                 }
             }
 
             if (!foundVariant) {
-                val safeUrl = videoUrl.replace(" ", "%20").replace("[", "%5B").replace("]", "%5D")
-                android.util.Log.d("An1me_Video", "No variants in m3u8, adding master: $safeUrl")
-                callback.invoke(createLink(name, name, safeUrl, mainUrl, Qualities.Unknown.value, ExtractorLinkType.M3U8))
+                callback(createLink(name, name, videoUrl, mainUrl, Qualities.Unknown.value, ExtractorLinkType.M3U8))
             }
-
             return true
         } catch (e: Exception) {
             android.util.Log.e("An1me_Video", "Error handling m3u8: ${e.message}", e)
