@@ -13,8 +13,8 @@ class An1meProvider : MainAPI() {
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Anime)
 
-    // Helper function to create extractor links (simplified for new API)
-    private fun createLink(sourceName: String, linkName: String, url: String): ExtractorLink {
+    // Suspend helper for creating extractor links
+    private suspend fun createLink(sourceName: String, linkName: String, url: String): ExtractorLink {
         return newExtractorLink(
             source = sourceName,
             name = linkName,
