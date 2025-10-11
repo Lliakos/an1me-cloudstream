@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import java.util.Base64
 import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 
 @Suppress("DEPRECATION")
 class An1meProvider : MainAPI() {
@@ -14,23 +15,22 @@ class An1meProvider : MainAPI() {
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Anime)
 
-    // ✅ FIXED: now suspend + updated params
+    // Helper suspend function to safely create extractor links
     private suspend fun createLink(
         sourceName: String,
         linkName: String,
         url: String,
         referer: String,
-        quality: Int,
-        isM3u8: Boolean = false
+        quality: Int
     ): ExtractorLink {
         return newExtractorLink(
             source = sourceName,
             name = linkName,
             url = url,
-            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+            type = ExtractorLinkType.M3U8
         ) {
+            this.referer = referer
             this.quality = quality
-            this.headers = mapOf("Referer" to referer)
         }
     }
 
@@ -62,7 +62,7 @@ class An1meProvider : MainAPI() {
         val searchUrl = "$mainUrl/search/?s_keyword=$query"
         val document = app.get(searchUrl).document
 
-        val results = document.select("#first_load_result > div").mapNotNull { item ->
+        return document.select("#first_load_result > div").mapNotNull { item ->
             val link = item.selectFirst("a[href*='/anime/']") ?: return@mapNotNull null
             val href = fixUrl(link.attr("href"))
 
@@ -76,8 +76,6 @@ class An1meProvider : MainAPI() {
                 this.posterUrl = posterUrl
             }
         }
-
-        return results
     }
 
     override suspend fun load(url: String): LoadResponse {
@@ -113,7 +111,6 @@ class An1meProvider : MainAPI() {
         }
     }
 
-    // ✅ FIXED: loadLinks unchanged except now works with suspend createLink
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -123,111 +120,95 @@ class An1meProvider : MainAPI() {
         try {
             val document = app.get(data).document
             val iframeSrc = document.selectFirst("iframe[src*='kr-video']")?.attr("src")
+                ?: return false.also { android.util.Log.d("An1me_Video", "No iframe found") }
 
-            if (iframeSrc.isNullOrEmpty()) return false
+            android.util.Log.d("An1me_Video", "Iframe src: $iframeSrc")
 
             val base64Part = iframeSrc.substringAfter("/kr-video/").substringBefore("?")
-            if (base64Part.isEmpty()) return false
+            if (base64Part.isEmpty()) return false.also {
+                android.util.Log.d("An1me_Video", "No base64 part found")
+            }
 
             val decodedUrl = String(Base64.getDecoder().decode(base64Part))
+            android.util.Log.d("An1me_Video", "Decoded URL: $decodedUrl")
+
             val videoUrl = decodedUrl
 
-            when {
-                videoUrl.contains(".m3u8") -> {
-                    val m3u8Response = app.get(videoUrl).text
-                    val lines = m3u8Response.lines()
-                    var currentQuality = Qualities.Unknown.value
-                    var currentName = "Unknown"
+            if (videoUrl.contains(".m3u8")) {
+                android.util.Log.d("An1me_Video", "Direct M3U8 link found, generating links")
 
-                    lines.forEachIndexed { index, line ->
-                        if (line.startsWith("#EXT-X-STREAM-INF")) {
-                            val resolutionMatch = """RESOLUTION=\d+x(\d+)""".toRegex().find(line)
-                            val height = resolutionMatch?.groupValues?.get(1)?.toIntOrNull()
+                val m3u8Response = app.get(videoUrl).text
+                val lines = m3u8Response.lines()
+                var currentQuality = Qualities.Unknown.value
+                var currentName = "Unknown"
 
-                            currentQuality = when (height) {
-                                2160 -> Qualities.P2160.value
-                                1440 -> Qualities.P1440.value
-                                1080 -> Qualities.P1080.value
-                                720 -> Qualities.P720.value
-                                480 -> Qualities.P480.value
-                                360 -> Qualities.P360.value
-                                else -> Qualities.Unknown.value
-                            }
-                            currentName = "${height}p"
+                lines.forEachIndexed { index, line ->
+                    if (line.startsWith("#EXT-X-STREAM-INF")) {
+                        val resolutionMatch = """RESOLUTION=\d+x(\d+)""".toRegex().find(line)
+                        val height = resolutionMatch?.groupValues?.get(1)?.toIntOrNull()
+                        currentQuality = when (height) {
+                            2160 -> Qualities.P2160.value
+                            1440 -> Qualities.P1440.value
+                            1080 -> Qualities.P1080.value
+                            720 -> Qualities.P720.value
+                            480 -> Qualities.P480.value
+                            360 -> Qualities.P360.value
+                            else -> Qualities.Unknown.value
+                        }
+                        currentName = "${height}p"
 
-                            if (index + 1 < lines.size) {
-                                val urlLine = lines[index + 1]
-                                if (!urlLine.startsWith("#")) {
-                                    val fullUrl = if (urlLine.startsWith("http")) {
-                                        urlLine
-                                    } else {
-                                        val baseUrl = videoUrl.substringBeforeLast("/")
-                                        "$baseUrl/$urlLine"
-                                    }
-
-                                    callback.invoke(
-                                        createLink(
-                                            name,
-                                            "$name $currentName",
-                                            fullUrl,
-                                            mainUrl,
-                                            currentQuality,
-                                            true
-                                        )
-                                    )
+                        if (index + 1 < lines.size) {
+                            var urlLine = lines[index + 1]
+                            if (!urlLine.startsWith("#")) {
+                                val fullUrl = if (urlLine.startsWith("http")) urlLine else {
+                                    val baseUrl = videoUrl.substringBeforeLast("/")
+                                    "$baseUrl/$urlLine"
                                 }
+
+                                // Encode unsafe characters like [ ] and spaces
+                                val safeUrl = fullUrl.replace(" ", "%20")
+                                    .replace("[", "%5B")
+                                    .replace("]", "%5D")
+
+                                android.util.Log.d("An1me_Video", "Adding quality link: $currentName - $safeUrl")
+
+                                callback.invoke(
+                                    createLink(
+                                        name,
+                                        "$name $currentName",
+                                        safeUrl,
+                                        mainUrl,
+                                        currentQuality
+                                    )
+                                )
                             }
                         }
                     }
+                }
 
-                    if (lines.none { it.startsWith("#EXT-X-STREAM-INF") }) {
-                        callback.invoke(
-                            createLink(
-                                name,
-                                name,
-                                videoUrl,
-                                mainUrl,
-                                Qualities.Unknown.value,
-                                true
-                            )
+                // Fallback: add master playlist directly if no variants
+                if (lines.none { it.startsWith("#EXT-X-STREAM-INF") }) {
+                    val safeUrl = videoUrl.replace(" ", "%20")
+                        .replace("[", "%5B")
+                        .replace("]", "%5D")
+
+                    callback.invoke(
+                        createLink(
+                            name,
+                            name,
+                            safeUrl,
+                            mainUrl,
+                            Qualities.Unknown.value
                         )
-                    }
-                    return true
-                }
-
-                videoUrl.startsWith("http") && !videoUrl.contains(".m3u8") -> {
-                    val iframeDoc = app.get(videoUrl).document
-                    val scripts = iframeDoc.select("script")
-                    val scriptText = scripts.firstOrNull {
-                        it.data().contains("params") || it.data().contains("sources")
-                    }?.data() ?: return false
-
-                    val patterns = listOf(
-                        """"url"\s*:\s*"([^"]+)"""",
-                        """https?://[^\s"'<>]+\.m3u8[^\s"'<>]*"""
                     )
-
-                    for (pattern in patterns) {
-                        val match = pattern.toRegex().find(scriptText)
-                        if (match != null) {
-                            val extractedUrl = match.groupValues.getOrNull(1)?.let {
-                                it.replace("\\/", "/").replace("\\", "")
-                            } ?: match.value
-
-                            M3u8Helper.generateM3u8(
-                                source = name,
-                                streamUrl = extractedUrl,
-                                referer = videoUrl
-                            ).forEach(callback)
-                            return true
-                        }
-                    }
-                    return false
                 }
 
-                else -> return false
+                return true
             }
+
+            return false
         } catch (e: Exception) {
+            android.util.Log.e("An1me_Video", "Error: ${e.message}", e)
             return false
         }
     }
