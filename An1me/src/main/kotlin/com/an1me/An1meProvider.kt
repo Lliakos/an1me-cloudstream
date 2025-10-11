@@ -130,12 +130,12 @@ class An1meProvider : MainAPI() {
             val decodedUrl = String(Base64.getDecoder().decode(base64Part))
             android.util.Log.d("An1me_Video", "Decoded URL: $decodedUrl")
 
-            // M3U8 direct
+            // If m3u8 directly
             if (decodedUrl.contains(".m3u8")) {
                 return handleM3u8(decodedUrl, callback)
             }
 
-            // ✅ FIXED: Handle WeTransfer
+            // ✅ FIX: Robust WeTransfer parsing
             if (decodedUrl.contains("wetransfer.com")) {
                 android.util.Log.d("An1me_Video", "Detected WeTransfer link, attempting extraction...")
 
@@ -145,11 +145,25 @@ class An1meProvider : MainAPI() {
 
                 android.util.Log.d("An1me_Video", "WeTransfer iframe URL: $finalUrl")
 
-                val innerDoc = app.get(finalUrl, referer = decodedUrl).document
-                val videoSources = innerDoc.select("video source[src]").map { it.attr("src") }
+                val innerResponse = app.get(finalUrl, referer = decodedUrl)
+                val innerHtml = innerResponse.text
 
-                if (videoSources.isNotEmpty()) {
-                    videoSources.forEach { videoUrl ->
+                val videoSources = Regex("""<source[^>]+src=["']([^"']+\.mp4[^"']*)["']""")
+                    .findAll(innerHtml)
+                    .map { it.groupValues[1] }
+                    .toList()
+
+                val fallbackMatches = if (videoSources.isEmpty()) {
+                    Regex("""https?://[^\s"'<>]+(?:\.mp4|\.m3u8)[^\s"'<>]*""")
+                        .findAll(innerHtml)
+                        .map { it.value }
+                        .toList()
+                } else emptyList()
+
+                val allLinks = (videoSources + fallbackMatches).distinct()
+
+                if (allLinks.isNotEmpty()) {
+                    allLinks.forEach { videoUrl ->
                         callback(
                             createLink(
                                 sourceName = name,
@@ -157,18 +171,18 @@ class An1meProvider : MainAPI() {
                                 url = fixUrl(videoUrl),
                                 referer = finalUrl,
                                 quality = Qualities.Unknown.value,
-                                type = ExtractorLinkType.VIDEO
+                                type = if (videoUrl.endsWith(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                             )
                         )
                     }
-                    android.util.Log.d("An1me_Video", "WeTransfer videos found: ${videoSources.size}")
+                    android.util.Log.d("An1me_Video", "WeTransfer videos found: ${allLinks.size}")
                     return true
                 } else {
-                    android.util.Log.d("An1me_Video", "No MP4 found in WeTransfer iframe page")
+                    android.util.Log.d("An1me_Video", "No video URLs found in WeTransfer page")
                 }
             }
 
-            // Normal extraction (Google Photos, MP4, M3U8)
+            // Continue scanning decoded URL
             val pagesToScan = mutableListOf<Pair<String, String>>()
             pagesToScan.add(Pair(decodedUrl, mainUrl))
 
