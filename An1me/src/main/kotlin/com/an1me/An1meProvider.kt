@@ -6,11 +6,11 @@ import org.jsoup.nodes.Document
 import java.util.Base64
 
 class An1meProvider : MainAPI() {
-    override val mainUrl = "https://an1me.to"
-    override val name = "An1me"
-    override val hasMainPage = true
-    override val lang = "en"
-    override val supportedTypes = setOf(TvType.Anime)
+    override var mainUrl = "https://an1me.to"
+    override var name = "An1me"
+    override var hasMainPage = true
+    override var lang = "en"
+    override var supportedTypes = setOf(TvType.Anime)
 
     override suspend fun search(query: String): List<SearchResponse> {
         val url = "$mainUrl/search?query=${query.replace(" ", "+")}"
@@ -30,11 +30,13 @@ class An1meProvider : MainAPI() {
         val title = doc.selectFirst("h2")?.text() ?: "Unknown"
         val poster = doc.selectFirst(".film-poster-img")?.attr("data-src")
         val description = doc.selectFirst(".description, .film-description")?.text()
+
         val episodes = doc.select("div#episode_related li a").mapNotNull {
             val epHref = fixUrl(it.attr("href"))
             val epName = it.text()
-            Episode(epHref, epName)
+            newEpisode(epHref) { this.name = epName }
         }
+
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = poster
             this.plot = description
@@ -103,13 +105,15 @@ class An1meProvider : MainAPI() {
                                     .replace("]", "%5D")
 
                                 callback.invoke(
-                                    createLink(
+                                    newExtractorLink(
                                         name,
                                         "$name $currentName",
                                         safeUrl,
-                                        mainUrl,
-                                        currentQuality
-                                    )
+                                        ExtractorLinkType.M3U8
+                                    ) {
+                                        this.quality = currentQuality
+                                        this.isM3u8 = true
+                                    }
                                 )
                             }
                         }
@@ -122,13 +126,15 @@ class An1meProvider : MainAPI() {
                         .replace("]", "%5D")
 
                     callback.invoke(
-                        createLink(
+                        newExtractorLink(
                             name,
                             name,
                             safeUrl,
-                            mainUrl,
-                            Qualities.Unknown.value
-                        )
+                            ExtractorLinkType.M3U8
+                        ) {
+                            this.quality = Qualities.Unknown.value
+                            this.isM3u8 = true
+                        }
                     )
                 }
 
@@ -141,7 +147,6 @@ class An1meProvider : MainAPI() {
 
                 val photoDoc = app.get(videoUrl, referer = mainUrl).document
 
-                // Try both meta and video tags
                 val videoDirect =
                     photoDoc.selectFirst("meta[property=og:video]")?.attr("content")
                         ?: photoDoc.selectFirst("video")?.attr("src")
@@ -150,13 +155,15 @@ class An1meProvider : MainAPI() {
                     android.util.Log.d("An1me_Video", "Extracted direct video: $videoDirect")
 
                     callback.invoke(
-                        createLink(
+                        newExtractorLink(
                             name,
                             "$name GoogleVideo",
                             videoDirect,
-                            mainUrl,
-                            Qualities.Unknown.value
-                        )
+                            ExtractorLinkType.DIRECT
+                        ) {
+                            this.quality = Qualities.Unknown.value
+                            this.isM3u8 = false
+                        }
                     )
                     return true
                 } else {
