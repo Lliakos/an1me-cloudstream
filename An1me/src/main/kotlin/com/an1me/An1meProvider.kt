@@ -134,13 +134,12 @@ class An1meProvider : MainAPI() {
                     
                     // Add the M3U8 URL directly - let the player handle it
                     callback.invoke(
-                        ExtractorLink(
-                            name,
-                            name,
-                            videoUrl,
-                            mainUrl,
-                            Qualities.Unknown.value,
-                            true // isM3u8
+                        newExtractorLink(
+                            name = name,
+                            url = videoUrl,
+                            refererUrl = mainUrl,
+                            quality = Qualities.Unknown.value,
+                            isM3u8 = true
                         )
                     )
                     android.util.Log.d("An1me_Video", "Added M3U8 link successfully")
