@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import java.util.Base64
+import org.json.JSONObject
 
 @Suppress("DEPRECATION")
 class An1meProvider : MainAPI() {
@@ -122,26 +123,14 @@ class An1meProvider : MainAPI() {
 
             android.util.Log.d("An1me_Video", "Iframe src: $iframeSrc")
 
-            val base64Part = iframeSrc.substringAfter("/kr-video/").substringBefore("?")
-            if (base64Part.isEmpty()) return false.also {
-                android.util.Log.d("An1me_Video", "No base64 part found")
-            }
-
-            val decodedUrl = String(Base64.getDecoder().decode(base64Part))
-            android.util.Log.d("An1me_Video", "Decoded URL: $decodedUrl")
-
-            // Handle WeTransfer links properly
-            if (decodedUrl.contains("wetransfer.com")) {
-                android.util.Log.d("An1me_Video", "Detected WeTransfer link, attempting extraction...")
-
+            // Only process WeTransfer iframe pages this special way
+            if (iframeSrc.contains("wetransfer", true)) {
                 try {
-                    val mainDoc = app.get(decodedUrl)
-                    val iframeSrc2 = mainDoc.document.selectFirst("iframe")?.attr("src")
-                    val iframeUrl = iframeSrc2 ?: decodedUrl
-                    android.util.Log.d("An1me_Video", "WeTransfer iframe URL: $iframeUrl")
+                    android.util.Log.d("An1me_Video", "Detected WeTransfer iframe, fetching HTML...")
 
-                    val iframeHtml = app.get(iframeUrl, referer = decodedUrl).text
+                    val iframeHtml = app.get(iframeSrc, referer = data).text
 
+                    // Clean escaped HTML
                     val cleanedHtml = iframeHtml
                         .replace("&quot;", "\"")
                         .replace("&amp;", "&")
@@ -152,26 +141,25 @@ class An1meProvider : MainAPI() {
                         .replace("\\\\", "\\")
                         .replace("\\/", "/")
 
-                    val jsonData = Regex("""params\s*=\s*(\{.*?"sources".*?\});""", RegexOption.DOT_MATCHES_ALL)
+                    // Find const params JSON
+                    val jsonMatch = Regex("""const\s+params\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL)
                         .find(cleanedHtml)
-                        ?.groupValues?.get(1)
-
-                    if (jsonData == null) {
-                        android.util.Log.d("An1me_Video", "No JSON params found even after deep cleaning")
+                    if (jsonMatch == null) {
+                        android.util.Log.d("An1me_Video", "No JSON params found in iframe HTML")
                         return false
                     }
 
-                    android.util.Log.d("An1me_Video", "Found WeTransfer params JSON")
-
-                    val urlMatches = Regex(""""url"\s*:\s*"([^"]+)"""").findAll(jsonData)
-                    val foundUrls = urlMatches.map { it.groupValues[1].replace("\\/", "/") }.toList()
-
-                    if (foundUrls.isEmpty()) {
-                        android.util.Log.d("An1me_Video", "No URLs found inside JSON params")
-                        return false
+                    val jsonString = jsonMatch.groupValues[1]
+                    val json = JSONObject(jsonString)
+                    val sources = json.optJSONArray("sources") ?: return false.also {
+                        android.util.Log.d("An1me_Video", "No sources found inside params JSON")
                     }
 
-                    foundUrls.forEach { videoUrl ->
+                    for (i in 0 until sources.length()) {
+                        val srcObj = sources.getJSONObject(i)
+                        val videoUrl = srcObj.optString("url")
+                        if (videoUrl.isNullOrEmpty()) continue
+
                         android.util.Log.d("An1me_Video", "Found WeTransfer video URL: $videoUrl")
 
                         callback(
@@ -179,7 +167,7 @@ class An1meProvider : MainAPI() {
                                 sourceName = name,
                                 linkName = "$name (WeTransfer)",
                                 url = videoUrl,
-                                referer = iframeUrl,
+                                referer = iframeSrc,
                                 quality = when {
                                     videoUrl.contains("1080", true) -> Qualities.P1080.value
                                     videoUrl.contains("720", true) -> Qualities.P720.value
@@ -192,16 +180,34 @@ class An1meProvider : MainAPI() {
                     }
 
                     return true
-
                 } catch (e: Exception) {
-                    android.util.Log.e("An1me_Video", "Error parsing WeTransfer iframe: ${e.message}", e)
+                    android.util.Log.e("An1me_Video", "Error extracting WeTransfer iframe: ${e.message}", e)
                     return false
                 }
             }
 
-            // If not WeTransfer, return false
-            return false
+            // Handle all other normal iframe sources
+            val iframeDoc = app.get(iframeSrc, referer = data).document
+            val videoTag = iframeDoc.selectFirst("video source[src], video[src]")
+            if (videoTag != null) {
+                val videoUrl = videoTag.attr("src")
+                android.util.Log.d("An1me_Video", "Normal video source found: $videoUrl")
 
+                callback(
+                    createLink(
+                        sourceName = name,
+                        linkName = name,
+                        url = videoUrl,
+                        referer = iframeSrc,
+                        quality = Qualities.Unknown.value,
+                        type = if (videoUrl.endsWith(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    )
+                )
+                return true
+            }
+
+            android.util.Log.d("An1me_Video", "No valid video link found.")
+            return false
         } catch (e: Exception) {
             android.util.Log.e("An1me_Video", "Error loading links: ${e.message}", e)
             return false
