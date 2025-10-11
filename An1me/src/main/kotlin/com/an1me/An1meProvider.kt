@@ -4,7 +4,6 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import java.util.Base64
-import java.net.URLEncoder
 
 @Suppress("DEPRECATION")
 class An1meProvider : MainAPI() {
@@ -14,22 +13,12 @@ class An1meProvider : MainAPI() {
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Anime)
 
-    // Helper function to create extractor links
-    private suspend fun createLink(
-        sourceName: String,
-        linkName: String,
-        url: String,
-        quality: Int,
-        isM3u8: Boolean = false
-    ): ExtractorLink {
+    // Helper function to create extractor links (simplified for new API)
+    private fun createLink(sourceName: String, linkName: String, url: String): ExtractorLink {
         return newExtractorLink(
             source = sourceName,
             name = linkName,
-            url = url,
-            type = ExtractorLinkType.Other,
-            headers = mapOf("Referer" to mainUrl),
-            quality = quality,
-            isM3u8 = isM3u8
+            url = url
         )
     }
 
@@ -124,31 +113,13 @@ class An1meProvider : MainAPI() {
 
             val decodedUrl = String(Base64.getDecoder().decode(base64Part))
 
-            // If it ends with m3u8, create quality links
+            // If it ends with m3u8, use M3u8Helper
             if (decodedUrl.contains(".m3u8")) {
-                val m3u8Response = app.get(decodedUrl).text
-                val lines = m3u8Response.lines()
-
-                lines.forEachIndexed { index, line ->
-                    if (line.startsWith("#EXT-X-STREAM-INF")) {
-                        val resolutionMatch = """RESOLUTION=\d+x(\d+)""".toRegex().find(line)
-                        val height = resolutionMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                        val quality = when (height) {
-                            2160 -> Qualities.P2160.value
-                            1440 -> Qualities.P1440.value
-                            1080 -> Qualities.P1080.value
-                            720 -> Qualities.P720.value
-                            480 -> Qualities.P480.value
-                            360 -> Qualities.P360.value
-                            else -> Qualities.Unknown.value
-                        }
-                        val urlLine = lines.getOrNull(index + 1) ?: return@forEachIndexed
-                        if (!urlLine.startsWith("#")) {
-                            val fullUrl = if (urlLine.startsWith("http")) urlLine else decodedUrl.substringBeforeLast("/") + "/" + urlLine
-                            callback.invoke(createLink(name, "$name ${height}p", fullUrl, quality, true))
-                        }
-                    }
-                }
+                M3u8Helper.generateM3u8(
+                    source = name,
+                    streamUrl = decodedUrl,
+                    referer = data
+                ).forEach(callback)
                 return true
             } else {
                 // Fallback for iframe pages
