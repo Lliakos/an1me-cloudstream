@@ -123,14 +123,31 @@ class An1meProvider : MainAPI() {
 
             android.util.Log.d("An1me_Video", "Iframe src: $iframeSrc")
 
-            // Only process WeTransfer iframe pages this special way
-            if (iframeSrc.contains("wetransfer", true)) {
-                try {
-                    android.util.Log.d("An1me_Video", "Detected WeTransfer iframe, fetching HTML...")
+            // Extract base64 part (same as before) but do NOT automatically use decoded URL for WeTransfer
+            val base64Part = iframeSrc.substringAfter("/kr-video/").substringBefore("?")
+            if (base64Part.isEmpty()) {
+                android.util.Log.d("An1me_Video", "No base64 part found")
+                return false
+            }
 
+            // Decode for later use (non-WeTransfer)
+            val decodedUrl = try {
+                String(Base64.getDecoder().decode(base64Part))
+            } catch (e: Exception) {
+                android.util.Log.e("An1me_Video", "Base64 decode failed: ${e.message}", e)
+                ""
+            }
+            android.util.Log.d("An1me_Video", "Decoded URL: $decodedUrl")
+
+            // If this is a WeTransfer iframe, DO NOT use decodedUrl for extraction.
+            // Instead fetch the kr-video iframe URL (iframeSrc) and find const params = {...} inside it.
+            if (iframeSrc.contains("wetransfer", true) || decodedUrl.contains("wetransfer", true)) {
+                android.util.Log.d("An1me_Video", "Detected WeTransfer source — using iframeSrc HTML to extract params")
+
+                try {
+                    // Fetch the iframeSrc HTML (do not decode) and extract the JS params object
                     val iframeHtml = app.get(iframeSrc, referer = data).text
 
-                    // Clean escaped HTML
                     val cleanedHtml = iframeHtml
                         .replace("&quot;", "\"")
                         .replace("&amp;", "&")
@@ -141,18 +158,18 @@ class An1meProvider : MainAPI() {
                         .replace("\\\\", "\\")
                         .replace("\\/", "/")
 
-                    // Find const params JSON
                     val jsonMatch = Regex("""const\s+params\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL)
                         .find(cleanedHtml)
+
                     if (jsonMatch == null) {
-                        android.util.Log.d("An1me_Video", "No JSON params found in iframe HTML")
+                        android.util.Log.d("An1me_Video", "No 'const params' JSON found in WeTransfer iframe HTML")
                         return false
                     }
 
                     val jsonString = jsonMatch.groupValues[1]
                     val json = JSONObject(jsonString)
                     val sources = json.optJSONArray("sources") ?: return false.also {
-                        android.util.Log.d("An1me_Video", "No sources found inside params JSON")
+                        android.util.Log.d("An1me_Video", "No sources found in params JSON")
                     }
 
                     for (i in 0 until sources.length()) {
@@ -181,32 +198,103 @@ class An1meProvider : MainAPI() {
 
                     return true
                 } catch (e: Exception) {
-                    android.util.Log.e("An1me_Video", "Error extracting WeTransfer iframe: ${e.message}", e)
+                    android.util.Log.e("An1me_Video", "Error extracting WeTransfer iframe HTML: ${e.message}", e)
                     return false
                 }
             }
 
-            // Handle all other normal iframe sources
-            val iframeDoc = app.get(iframeSrc, referer = data).document
-            val videoTag = iframeDoc.selectFirst("video source[src], video[src]")
-            if (videoTag != null) {
-                val videoUrl = videoTag.attr("src")
-                android.util.Log.d("An1me_Video", "Normal video source found: $videoUrl")
-
-                callback(
-                    createLink(
-                        sourceName = name,
-                        linkName = name,
-                        url = videoUrl,
-                        referer = iframeSrc,
-                        quality = Qualities.Unknown.value,
-                        type = if (videoUrl.endsWith(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+            // -------------------------
+            // Non-WeTransfer flow (preserve original decode behavior)
+            // -------------------------
+            // If the decoded URL already points to an m3u8 or mp4, return it directly.
+            if (!decodedUrl.isEmpty()) {
+                if (decodedUrl.contains(".m3u8", true)) {
+                    android.util.Log.d("An1me_Video", "Decoded URL is an m3u8, returning as M3U8")
+                    callback(
+                        createLink(
+                            sourceName = name,
+                            linkName = name,
+                            url = decodedUrl,
+                            referer = iframeSrc,
+                            quality = Qualities.Unknown.value,
+                            type = ExtractorLinkType.M3U8
+                        )
                     )
-                )
-                return true
+                    return true
+                }
+                if (decodedUrl.contains(".mp4", true) || decodedUrl.contains("googleusercontent", true) || decodedUrl.contains("googleapis", true)) {
+                    android.util.Log.d("An1me_Video", "Decoded URL looks like direct video, returning as VIDEO")
+                    callback(
+                        createLink(
+                            sourceName = name,
+                            linkName = name,
+                            url = decodedUrl,
+                            referer = iframeSrc,
+                            quality = Qualities.Unknown.value,
+                            type = ExtractorLinkType.VIDEO
+                        )
+                    )
+                    return true
+                }
+
+                // If decoded URL is a page (e.g. contains its own iframe), try to fetch it and find a video or m3u8 inside.
+                try {
+                    val decodedDocResponse = app.get(decodedUrl, referer = iframeSrc)
+                    val decodedDoc = decodedDocResponse.document
+                    // try to find video source tags or iframes
+                    val videoTag = decodedDoc.selectFirst("video source[src], video[src]")
+                    if (videoTag != null) {
+                        val videoUrl = videoTag.attr("src")
+                        android.util.Log.d("An1me_Video", "Video source found inside decoded page: $videoUrl")
+                        callback(
+                            createLink(
+                                sourceName = name,
+                                linkName = name,
+                                url = videoUrl,
+                                referer = decodedUrl,
+                                quality = Qualities.Unknown.value,
+                                type = if (videoUrl.endsWith(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                            )
+                        )
+                        return true
+                    }
+
+                    // Some providers return an iframe inside the decoded page. Follow it if present.
+                    val innerIframe = decodedDoc.selectFirst("iframe[src]")
+                    val innerIframeSrc = innerIframe?.attr("src")
+                    if (!innerIframeSrc.isNullOrEmpty()) {
+                        android.util.Log.d("An1me_Video", "Found inner iframe inside decoded page: $innerIframeSrc")
+                        // If inner iframe points to m3u8 or mp4 directly, return it
+                        if (innerIframeSrc.contains(".m3u8", true)) {
+                            callback(createLink(name, name, innerIframeSrc, decodedUrl, Qualities.Unknown.value, ExtractorLinkType.M3U8))
+                            return true
+                        } else {
+                            val innerDoc = app.get(innerIframeSrc, referer = decodedUrl).document
+                            val innerVideoTag = innerDoc.selectFirst("video source[src], video[src]")
+                            if (innerVideoTag != null) {
+                                val vurl = innerVideoTag.attr("src")
+                                android.util.Log.d("An1me_Video", "Found video in inner iframe: $vurl")
+                                callback(
+                                    createLink(
+                                        sourceName = name,
+                                        linkName = name,
+                                        url = vurl,
+                                        referer = innerIframeSrc,
+                                        quality = Qualities.Unknown.value,
+                                        type = if (vurl.endsWith(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    )
+                                )
+                                return true
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("An1me_Video", "Error following decoded URL: ${e.message}", e)
+                    // fallthrough to failure return below
+                }
             }
 
-            android.util.Log.d("An1me_Video", "No valid video link found.")
+            android.util.Log.d("An1me_Video", "No valid video link found in non-WeTransfer flow.")
             return false
         } catch (e: Exception) {
             android.util.Log.e("An1me_Video", "Error loading links: ${e.message}", e)
