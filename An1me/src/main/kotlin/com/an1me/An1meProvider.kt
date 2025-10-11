@@ -18,7 +18,7 @@ class An1meProvider : MainAPI() {
         return document.select("div.film-list div.flw-item").mapNotNull {
             val title = it.selectFirst(".film-detail .film-name a")?.text() ?: return@mapNotNull null
             val href = fixUrl(it.selectFirst(".film-detail .film-name a")?.attr("href") ?: return@mapNotNull null)
-            val poster = it.selectFirst("img")?.attr("data-src") ?: ""
+            val poster = it.selectFirst("img")?.attr("data-src")
             newAnimeSearchResponse(title, href, TvType.Anime) {
                 posterUrl = poster
             }
@@ -39,10 +39,10 @@ class An1meProvider : MainAPI() {
             }
         }
 
-        // ✅ All mutable assignments moved into builder
+        // ✅ no reassignment — all inside builder
         return newAnimeLoadResponse(title, url, TvType.Anime) {
-            posterUrl = poster
-            plot = description
+            this.posterUrl = poster
+            this.plot = description
             addEpisodes(DubStatus.Subbed, episodes)
         }
     }
@@ -70,19 +70,17 @@ class An1meProvider : MainAPI() {
 
             val videoUrl = decodedUrl
 
-            // 🟩 Handle direct M3U8 links
+            // 🟢 Handle direct .m3u8
             if (videoUrl.contains(".m3u8")) {
-                android.util.Log.d("An1me_Video", "Direct M3U8 link found, generating links")
+                val m3u8Text = app.get(videoUrl).text
+                val lines = m3u8Text.lines()
 
-                val m3u8Response = app.get(videoUrl).text
-                val lines = m3u8Response.lines()
                 var currentQuality = Qualities.Unknown.value
-                var currentName = "Unknown"
 
-                lines.forEachIndexed { index, line ->
+                lines.forEachIndexed { i, line ->
                     if (line.startsWith("#EXT-X-STREAM-INF")) {
-                        val resolutionMatch = """RESOLUTION=\d+x(\d+)""".toRegex().find(line)
-                        val height = resolutionMatch?.groupValues?.get(1)?.toIntOrNull()
+                        val resMatch = """RESOLUTION=\d+x(\d+)""".toRegex().find(line)
+                        val height = resMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
                         currentQuality = when (height) {
                             2160 -> Qualities.P2160.value
                             1440 -> Qualities.P1440.value
@@ -92,14 +90,13 @@ class An1meProvider : MainAPI() {
                             360 -> Qualities.P360.value
                             else -> Qualities.Unknown.value
                         }
-                        currentName = "${height}p"
 
-                        if (index + 1 < lines.size) {
-                            val urlLine = lines[index + 1]
-                            if (!urlLine.startsWith("#")) {
-                                val fullUrl = if (urlLine.startsWith("http")) urlLine else {
-                                    val baseUrl = videoUrl.substringBeforeLast("/")
-                                    "$baseUrl/$urlLine"
+                        if (i + 1 < lines.size) {
+                            val nextUrl = lines[i + 1]
+                            if (!nextUrl.startsWith("#")) {
+                                val fullUrl = if (nextUrl.startsWith("http")) nextUrl else {
+                                    val base = videoUrl.substringBeforeLast("/")
+                                    "$base/$nextUrl"
                                 }
 
                                 val safeUrl = fullUrl
@@ -108,77 +105,63 @@ class An1meProvider : MainAPI() {
                                     .replace("]", "%5D")
 
                                 callback(
-                                    newExtractorLink(
-                                        name,
-                                        "$name $currentName",
+                                    ExtractorLink(
+                                        this.name,
+                                        "${this.name} ${height}p",
                                         safeUrl,
-                                        ExtractorLinkType.M3U8
-                                    ) {
-                                        quality = currentQuality
+                                        "",
+                                        quality = currentQuality,
                                         isM3u8 = true
-                                    }
+                                    )
                                 )
                             }
                         }
                     }
                 }
 
+                // if playlist is simple, just use it directly
                 if (lines.none { it.startsWith("#EXT-X-STREAM-INF") }) {
-                    val safeUrl = videoUrl.replace(" ", "%20")
+                    val safeUrl = videoUrl
+                        .replace(" ", "%20")
                         .replace("[", "%5B")
                         .replace("]", "%5D")
-
                     callback(
-                        newExtractorLink(
-                            name,
-                            name,
+                        ExtractorLink(
+                            this.name,
+                            this.name,
                             safeUrl,
-                            ExtractorLinkType.M3U8
-                        ) {
-                            quality = Qualities.Unknown.value
+                            "",
                             isM3u8 = true
-                        }
+                        )
                     )
                 }
 
                 return true
             }
 
-            // 🟨 Handle Google Photos embeds
+            // 🟡 Handle Google Photos embeds
             if (videoUrl.contains("photos.google.com")) {
-                android.util.Log.d("An1me_Video", "Detected Google Photos video source")
-
                 val photoDoc = app.get(videoUrl, referer = mainUrl).document
-
-                val videoDirect =
+                val directVideo =
                     photoDoc.selectFirst("meta[property=og:video]")?.attr("content")
                         ?: photoDoc.selectFirst("video")?.attr("src")
 
-                if (!videoDirect.isNullOrEmpty()) {
-                    android.util.Log.d("An1me_Video", "Extracted direct video: $videoDirect")
-
+                if (!directVideo.isNullOrEmpty()) {
                     callback(
-                        newExtractorLink(
-                            name,
-                            "$name GoogleVideo",
-                            videoDirect,
-                            ExtractorLinkType.VIDEO
-                        ) {
-                            quality = Qualities.Unknown.value
+                        ExtractorLink(
+                            this.name,
+                            "${this.name} GoogleVideo",
+                            directVideo,
+                            "",
                             isM3u8 = false
-                        }
+                        )
                     )
                     return true
-                } else {
-                    android.util.Log.d("An1me_Video", "No direct <video> tag found in Google Photos")
-                    return false
                 }
             }
 
-            // 🟥 Unknown format
             android.util.Log.d("An1me_Video", "Unsupported video format: $videoUrl")
             return false
-
         } catch (e: Exception) {
             android.util.Log.e("An1me_Video", "Error: ${e.message}", e)
             return false
