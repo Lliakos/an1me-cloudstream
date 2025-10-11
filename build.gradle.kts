@@ -64,8 +64,10 @@ subprojects {
                     "-Xno-receiver-assertions"
                 )
             }
+            kotlinOptions {
+                allWarningsAsErrors = false
+            }
         }
-    }
 
     dependencies {
         val cloudstream by configurations
