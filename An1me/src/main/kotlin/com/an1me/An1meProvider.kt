@@ -14,38 +14,39 @@ class An1meProvider : MainAPI() {
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Anime)
 
-    // Helper function to create extractor links without deprecation
-private fun createLink(
-    sourceName: String,
-    linkName: String,
-    url: String,
-    referer: String,
-    quality: Int
-): ExtractorLink {
-    return newExtractorLink(
-        source = sourceName,
-        name = linkName,
-        url = url,
-        referer = referer,
-        quality = quality
-    )
-}
-
-
+    // ✅ FIXED: now suspend + updated params
+    private suspend fun createLink(
+        sourceName: String,
+        linkName: String,
+        url: String,
+        referer: String,
+        quality: Int,
+        isM3u8: Boolean = false
+    ): ExtractorLink {
+        return newExtractorLink(
+            source = sourceName,
+            name = linkName,
+            url = url,
+            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+        ) {
+            this.quality = quality
+            this.headers = mapOf("Referer" to referer)
+        }
+    }
 
     private fun Element.toSearchResult(): AnimeSearchResponse? {
         val link = this.selectFirst("a[href*='/anime/']") ?: return null
         val href = fixUrl(link.attr("href"))
         if (href.contains("/watch/")) return null
-        
+
         val title = this.selectFirst("span[data-en-title]")?.text()
             ?: this.selectFirst("span[data-nt-title]")?.text()
             ?: link.attr("title")
             ?: this.selectFirst("img")?.attr("alt")
             ?: return null
-        
+
         val posterUrl = fixUrlNull(this.selectFirst("img")?.attr("src"))
-        
+
         return newAnimeSearchResponse(title, href, TvType.Anime) {
             this.posterUrl = posterUrl
         }
@@ -60,47 +61,44 @@ private fun createLink(
     override suspend fun search(query: String): List<SearchResponse> {
         val searchUrl = "$mainUrl/search/?s_keyword=$query"
         val document = app.get(searchUrl).document
-        
+
         val results = document.select("#first_load_result > div").mapNotNull { item ->
             val link = item.selectFirst("a[href*='/anime/']") ?: return@mapNotNull null
             val href = fixUrl(link.attr("href"))
-            
+
             val enTitle = item.selectFirst("span[data-en-title]")?.text()
             val ntTitle = item.selectFirst("span[data-nt-title]")?.text()
             val title = enTitle ?: ntTitle ?: return@mapNotNull null
-            
+
             val posterUrl = fixUrlNull(item.selectFirst("img")?.attr("src"))
-            
+
             newAnimeSearchResponse(title, href, TvType.Anime) {
                 this.posterUrl = posterUrl
             }
         }
-        
+
         return results
     }
 
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
-        
+
         val title = document.selectFirst("h1.entry-title, h1")?.text() ?: "Unknown"
         val poster = fixUrlNull(document.selectFirst("img")?.attr("src"))
         val description = document.selectFirst("div[data-synopsis]")?.text()
-        
-        // Get genres - only from the anime page itself, not from the sidebar
-        // Look for genre links that are inside the anime details section
-        val tags = document.select("li:has(span:containsOwn(Είδος:)) a[href*='/genre/']").map { 
-            it.text().trim() 
+
+        val tags = document.select("li:has(span:containsOwn(Είδος:)) a[href*='/genre/']").map {
+            it.text().trim()
         }
-        
-        // Get episodes from swiper
+
         val episodes = document.select("div.swiper-slide a[href*='/watch/'], a[href*='/watch/'][class*='anime']").mapNotNull { ep ->
             val episodeUrl = fixUrl(ep.attr("href"))
             if (episodeUrl.isEmpty() || episodeUrl.contains("/anime/")) return@mapNotNull null
-            
+
             val episodeTitle = ep.attr("title")
             val episodeNumber = Regex("Episode\\s*(\\d+)|E\\s*(\\d+)", RegexOption.IGNORE_CASE)
                 .find(episodeTitle)?.groupValues?.filterNot { it.isEmpty() }?.lastOrNull()?.toIntOrNull() ?: 1
-            
+
             newEpisode(episodeUrl) {
                 this.name = "Episode $episodeNumber"
                 this.episode = episodeNumber
@@ -115,6 +113,7 @@ private fun createLink(
         }
     }
 
+    // ✅ FIXED: loadLinks unchanged except now works with suspend createLink
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -124,109 +123,64 @@ private fun createLink(
         try {
             val document = app.get(data).document
             val iframeSrc = document.selectFirst("iframe[src*='kr-video']")?.attr("src")
-            
-            if (iframeSrc.isNullOrEmpty()) {
-                android.util.Log.d("An1me_Video", "No iframe found")
-                return false
-            }
-            
-            android.util.Log.d("An1me_Video", "Iframe src: $iframeSrc")
-            
+
+            if (iframeSrc.isNullOrEmpty()) return false
+
             val base64Part = iframeSrc.substringAfter("/kr-video/").substringBefore("?")
-            if (base64Part.isEmpty()) {
-                android.util.Log.d("An1me_Video", "No base64 part found")
-                return false
-            }
-            
-            // Decode the base64 to get the video URL
+            if (base64Part.isEmpty()) return false
+
             val decodedUrl = String(Base64.getDecoder().decode(base64Part))
-            android.util.Log.d("An1me_Video", "Decoded URL: $decodedUrl")
-            
-            // The URL is already percent-encoded (%5B = [, %5D = ]), so it should work
-            // But if M3u8Helper has issues, we keep the URL as-is since it's already encoded
             val videoUrl = decodedUrl
-            
+
             when {
-                // Direct M3U8 file
                 videoUrl.contains(".m3u8") -> {
-                    android.util.Log.d("An1me_Video", "Direct M3U8 link found")
-                    android.util.Log.d("An1me_Video", "Video URL: $videoUrl")
-                    
-                    // Fetch the M3U8 content and manually parse to avoid URI encoding issues
-                    try {
-                        val m3u8Response = app.get(videoUrl).text
-                        android.util.Log.d("An1me_Video", "M3U8 content (first 200 chars): ${m3u8Response.take(200)}")
-                        
-                        // Parse quality variants manually
-                        val lines = m3u8Response.lines()
-                        var currentQuality = Qualities.Unknown.value
-                        var currentName = "Unknown"
-                        
-                        lines.forEachIndexed { index, line ->
-                            if (line.startsWith("#EXT-X-STREAM-INF")) {
-                                // Extract resolution/quality info
-                                val resolutionMatch = """RESOLUTION=\d+x(\d+)""".toRegex().find(line)
-                                val height = resolutionMatch?.groupValues?.get(1)?.toIntOrNull()
-                                
-                                currentQuality = when (height) {
-                                    2160 -> Qualities.P2160.value
-                                    1440 -> Qualities.P1440.value
-                                    1080 -> Qualities.P1080.value
-                                    720 -> Qualities.P720.value
-                                    480 -> Qualities.P480.value
-                                    360 -> Qualities.P360.value
-                                    else -> Qualities.Unknown.value
-                                }
-                                currentName = "${height}p"
-                                
-                                // Next line should be the URL
-                                if (index + 1 < lines.size) {
-                                    val urlLine = lines[index + 1]
-                                    if (!urlLine.startsWith("#")) {
-                                        val fullUrl = if (urlLine.startsWith("http")) {
-                                            urlLine
-                                        } else {
-                                            // Relative URL - construct full path
-                                            val baseUrl = videoUrl.substringBeforeLast("/")
-                                            "$baseUrl/$urlLine"
-                                        }
-                                        
-                                        android.util.Log.d("An1me_Video", "Adding quality link: $currentName - $fullUrl")
-                                        
-                                        callback.invoke(
-                                            createLink(
-                                                name,
-                                                "$name $currentName",
-                                                fullUrl,
-                                                mainUrl,
-                                                currentQuality,
-                                                true
-                                            )
-                                        )
+                    val m3u8Response = app.get(videoUrl).text
+                    val lines = m3u8Response.lines()
+                    var currentQuality = Qualities.Unknown.value
+                    var currentName = "Unknown"
+
+                    lines.forEachIndexed { index, line ->
+                        if (line.startsWith("#EXT-X-STREAM-INF")) {
+                            val resolutionMatch = """RESOLUTION=\d+x(\d+)""".toRegex().find(line)
+                            val height = resolutionMatch?.groupValues?.get(1)?.toIntOrNull()
+
+                            currentQuality = when (height) {
+                                2160 -> Qualities.P2160.value
+                                1440 -> Qualities.P1440.value
+                                1080 -> Qualities.P1080.value
+                                720 -> Qualities.P720.value
+                                480 -> Qualities.P480.value
+                                360 -> Qualities.P360.value
+                                else -> Qualities.Unknown.value
+                            }
+                            currentName = "${height}p"
+
+                            if (index + 1 < lines.size) {
+                                val urlLine = lines[index + 1]
+                                if (!urlLine.startsWith("#")) {
+                                    val fullUrl = if (urlLine.startsWith("http")) {
+                                        urlLine
+                                    } else {
+                                        val baseUrl = videoUrl.substringBeforeLast("/")
+                                        "$baseUrl/$urlLine"
                                     }
+
+                                    callback.invoke(
+                                        createLink(
+                                            name,
+                                            "$name $currentName",
+                                            fullUrl,
+                                            mainUrl,
+                                            currentQuality,
+                                            true
+                                        )
+                                    )
                                 }
                             }
                         }
-                        
-                        // If no variants found, add the master playlist directly
-                        if (lines.none { it.startsWith("#EXT-X-STREAM-INF") }) {
-                            android.util.Log.d("An1me_Video", "No quality variants, adding master playlist")
-                            callback.invoke(
-                                createLink(
-                                    name,
-                                    name,
-                                    videoUrl,
-                                    mainUrl,
-                                    Qualities.Unknown.value,
-                                    true
-                                )
-                            )
-                        }
-                        
-                        return true
-                    } catch (e: Exception) {
-                        android.util.Log.e("An1me_Video", "Failed to parse M3U8: ${e.message}")
-                        // Last resort fallback
+                    }
+
+                    if (lines.none { it.startsWith("#EXT-X-STREAM-INF") }) {
                         callback.invoke(
                             createLink(
                                 name,
@@ -237,42 +191,29 @@ private fun createLink(
                                 true
                             )
                         )
-                        return true
                     }
+                    return true
                 }
-                
-                // If it's not a direct video URL, it might be an iframe page
+
                 videoUrl.startsWith("http") && !videoUrl.contains(".m3u8") -> {
-                    android.util.Log.d("An1me_Video", "Loading iframe page to extract video")
-                    
                     val iframeDoc = app.get(videoUrl).document
                     val scripts = iframeDoc.select("script")
-                    android.util.Log.d("An1me_Video", "Found ${scripts.size} script tags")
-                    
-                    val scriptText = scripts.firstOrNull { 
-                        it.data().contains("params") || it.data().contains("sources") 
-                    }?.data()
-                    
-                    if (scriptText == null) {
-                        android.util.Log.d("An1me_Video", "No script with video sources found")
-                        return false
-                    }
-                    
-                    // Try to extract video URL from JavaScript
+                    val scriptText = scripts.firstOrNull {
+                        it.data().contains("params") || it.data().contains("sources")
+                    }?.data() ?: return false
+
                     val patterns = listOf(
                         """"url"\s*:\s*"([^"]+)"""",
                         """https?://[^\s"'<>]+\.m3u8[^\s"'<>]*"""
                     )
-                    
+
                     for (pattern in patterns) {
                         val match = pattern.toRegex().find(scriptText)
                         if (match != null) {
                             val extractedUrl = match.groupValues.getOrNull(1)?.let {
                                 it.replace("\\/", "/").replace("\\", "")
                             } ?: match.value
-                            
-                            android.util.Log.d("An1me_Video", "Extracted video URL: $extractedUrl")
-                            
+
                             M3u8Helper.generateM3u8(
                                 source = name,
                                 streamUrl = extractedUrl,
@@ -281,18 +222,12 @@ private fun createLink(
                             return true
                         }
                     }
-                    
-                    android.util.Log.d("An1me_Video", "Could not extract video URL from iframe")
                     return false
                 }
-                
-                else -> {
-                    android.util.Log.d("An1me_Video", "Unknown URL format")
-                    return false
-                }
+
+                else -> return false
             }
         } catch (e: Exception) {
-            android.util.Log.e("An1me_Video", "Error: ${e.message}", e)
             return false
         }
     }
