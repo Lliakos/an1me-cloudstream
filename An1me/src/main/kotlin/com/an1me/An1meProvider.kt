@@ -6,6 +6,7 @@ import org.jsoup.nodes.Element
 import java.util.Base64
 import java.net.URLEncoder
 
+@Suppress("DEPRECATION")
 class An1meProvider : MainAPI() {
     override var mainUrl = "https://an1me.to"
     override var name = "An1me"
@@ -134,12 +135,13 @@ class An1meProvider : MainAPI() {
                     
                     // Add the M3U8 URL directly - let the player handle it
                     callback.invoke(
-                        newExtractorLink(
-                            name = name,
-                            url = videoUrl,
-                            refererUrl = mainUrl,
-                            quality = Qualities.Unknown.value,
-                            isM3u8 = true
+                        ExtractorLink(
+                            name,
+                            name,
+                            videoUrl,
+                            mainUrl,
+                            Qualities.Unknown.value,
+                            true
                         )
                     )
                     android.util.Log.d("An1me_Video", "Added M3U8 link successfully")
