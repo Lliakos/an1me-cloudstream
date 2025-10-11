@@ -15,7 +15,7 @@ class An1meProvider : MainAPI() {
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Anime)
 
-    // Helper suspend function to safely create extractor links; allow specifying type
+    // Helper suspend function to safely create extractor links
     private suspend fun createLink(
         sourceName: String,
         linkName: String,
@@ -113,10 +113,8 @@ class An1meProvider : MainAPI() {
     }
 
     /**
-     * Entry point for loading links. It:
-     * 1) decodes kr-video base64 -> decodedUrl
-     * 2) fetches decodedUrl and looks for iframe; if found follows iframe
-     * 3) scans all fetched HTML for m3u8/mp4/googleusercontent links and handles them
+     * Core function: handle an1me.to links, decode base64,
+     * support WeTransfer and inner iframe extraction.
      */
     override suspend fun loadLinks(
         data: String,
@@ -139,142 +137,99 @@ class An1meProvider : MainAPI() {
             val decodedUrl = String(Base64.getDecoder().decode(base64Part))
             android.util.Log.d("An1me_Video", "Decoded URL: $decodedUrl")
 
-            // First: if decodedUrl itself is a direct m3u8 -> handle
+            // If m3u8 directly
             if (decodedUrl.contains(".m3u8")) {
-                android.util.Log.d("An1me_Video", "Decoded URL is m3u8, handling playlist")
                 return handleM3u8(decodedUrl, callback)
             }
 
-            // We'll fetch the decodedUrl HTML and also follow any iframe inside it (common)
-            val pagesToScan = mutableListOf<Pair<String, String>>() // Pair<pageUrl, referer>
-            pagesToScan.add(Pair(decodedUrl, mainUrl))
+            // Handle WeTransfer boards
+            if (decodedUrl.contains("wetransfer.com")) {
+                android.util.Log.d("An1me_Video", "Detected WeTransfer link, attempting extraction...")
+                val weDoc = app.get(decodedUrl).document
+                val nestedIframe = weDoc.selectFirst("iframe")?.attr("src")
+                val finalUrl = nestedIframe ?: decodedUrl
+                val finalDoc = app.get(finalUrl).document
+                val videoSources = finalDoc.select("video source[src]").map { it.attr("src") }
 
-            // Fetch decodedUrl and check for iframe inside (friend's hint)
-            try {
-                val decodedDoc = app.get(decodedUrl, referer = mainUrl).document
-                // If iframe inside decoded page, follow it (and add to scan list)
-                val innerIframe = decodedDoc.selectFirst("iframe")
-                if (innerIframe != null) {
-                    val innerSrc = innerIframe.attr("src")
-                    if (innerSrc.isNotEmpty()) {
-                        val resolved = if (innerSrc.startsWith("http")) innerSrc else fixUrl(innerSrc, decodedUrl)
-                        android.util.Log.d("An1me_Video", "Found inner iframe, following: $resolved")
-                        pagesToScan.add(Pair(resolved, decodedUrl))
+                if (videoSources.isNotEmpty()) {
+                    videoSources.forEach { videoUrl ->
+                        callback(
+                            createLink(
+                                sourceName = name,
+                                linkName = "$name (WeTransfer)",
+                                url = fixUrl(videoUrl),
+                                referer = decodedUrl,
+                                quality = Qualities.Unknown.value,
+                                type = ExtractorLinkType.VIDEO
+                            )
+                        )
                     }
+                    return true
+                } else {
+                    android.util.Log.d("An1me_Video", "No MP4 found in WeTransfer page")
                 }
-                // Also add the text/html of decoded page itself to scanning (we already added decodedUrl)
-            } catch (e: Exception) {
-                android.util.Log.d("An1me_Video", "Failed to fetch decodedUrl page: ${e.message}")
             }
 
-            // Track if we found anything
-            var foundAny = false
+            // Scan decodedUrl and inner iframe if any
+            val pagesToScan = mutableListOf<Pair<String, String>>()
+            pagesToScan.add(Pair(decodedUrl, mainUrl))
 
-            // For each page (decoded page and possibly iframe target), fetch text and look for known patterns
+            try {
+                val decodedDoc = app.get(decodedUrl, referer = mainUrl).document
+                val innerIframe = decodedDoc.selectFirst("iframe")?.attr("src")
+                if (!innerIframe.isNullOrEmpty()) {
+                    val resolved = if (innerIframe.startsWith("http")) innerIframe else fixUrl(innerIframe)
+                    android.util.Log.d("An1me_Video", "Found inner iframe, following: $resolved")
+                    pagesToScan.add(Pair(resolved, decodedUrl))
+                }
+            } catch (e: Exception) {
+                android.util.Log.d("An1me_Video", "Failed to fetch decoded page: ${e.message}")
+            }
+
+            var foundAny = false
             for ((pageUrl, referer) in pagesToScan) {
-                android.util.Log.d("An1me_Video", "Scanning page: $pageUrl (referer: $referer)")
                 val pageText = try {
                     app.get(pageUrl, referer = referer).text
                 } catch (e: Exception) {
-                    android.util.Log.d("An1me_Video", "Failed to get page: $pageUrl -> ${e.message}")
+                    android.util.Log.d("An1me_Video", "Failed to get page: ${e.message}")
                     continue
                 }
 
-                // 1) Look for video.googleusercontent (Google Photos direct)
-                val gg = Regex("https://video\\.googleusercontent\\.com/[^\"'\\s]+").find(pageText)?.value
-                if (gg != null) {
-                    android.util.Log.d("An1me_Video", "Found googleusercontent video: $gg")
-                    callback.invoke(
-                        createLink(
-                            sourceName = name,
-                            linkName = "$name (Google Photos)",
-                            url = gg,
-                            referer = pageUrl,
-                            quality = Qualities.Unknown.value,
-                            type = ExtractorLinkType.Other
-                        )
-                    )
+                // Googleusercontent
+                Regex("https://video\\.googleusercontent\\.com/[^\"'\\s]+").find(pageText)?.value?.let { gg ->
+                    callback(createLink(name, "$name (Google Photos)", gg, pageUrl, Qualities.Unknown.value, ExtractorLinkType.VIDEO))
                     foundAny = true
                 }
 
-                // 2) Look for direct .mp4 links
-                val mp4 = Regex("https?://[^\"'\\s]+\\.mp4[^\"'\\s]*").find(pageText)?.value
-                if (mp4 != null) {
-                    android.util.Log.d("An1me_Video", "Found direct mp4: $mp4")
-                    callback.invoke(
-                        createLink(
-                            sourceName = name,
-                            linkName = "$name (MP4)",
-                            url = mp4,
-                            referer = pageUrl,
-                            quality = Qualities.Unknown.value,
-                            type = ExtractorLinkType.Other
-                        )
-                    )
+                // MP4
+                Regex("https?://[^\"'\\s]+\\.mp4[^\"'\\s]*").find(pageText)?.value?.let { mp4 ->
+                    callback(createLink(name, "$name (MP4)", mp4, pageUrl, Qualities.Unknown.value, ExtractorLinkType.VIDEO))
                     foundAny = true
                 }
 
-                // 3) Look for m3u8 occurrences (if there's a player script embedding a playlist url)
-                val m3u8 = Regex("https?://[^\"'\\s]+\\.m3u8[^\"'\\s]*").find(pageText)?.value
-                if (m3u8 != null) {
-                    android.util.Log.d("An1me_Video", "Found m3u8 in page: $m3u8")
-                    // If m3u8 -> handle playlist parsing which will call callback for variants
+                // M3U8
+                Regex("https?://[^\"'\\s]+\\.m3u8[^\"'\\s]*").find(pageText)?.value?.let { m3u8 ->
                     if (handleM3u8(m3u8, callback)) foundAny = true
                 }
-
-                // 4) As a fallback for WeTransfer/collect pages that embed resources in JSON: capture any https urls that look like media
-                val genericMedia = Regex("https?://[^\"'\\s]+\\.(?:mp4|m3u8)[^\"'\\s]*").findAll(pageText)
-                for (match in genericMedia) {
-                    val url = match.value
-                    if (url.contains(".m3u8")) {
-                        android.util.Log.d("An1me_Video", "Fallback found m3u8: $url")
-                        if (handleM3u8(url, callback)) foundAny = true
-                    } else {
-                        android.util.Log.d("An1me_Video", "Fallback found mp4: $url")
-                        callback.invoke(
-                            createLink(
-                                sourceName = name,
-                                linkName = "$name (Fallback MP4)",
-                                url = url,
-                                referer = pageUrl,
-                                quality = Qualities.Unknown.value,
-                                type = ExtractorLinkType.Other
-                            )
-                        )
-                        foundAny = true
-                    }
-                }
             }
 
-            if (foundAny) {
-                return true
-            }
-
-            // If nothing found yet, still return false to let other providers try
-            android.util.Log.d("An1me_Video", "No playable links found after scanning decoded url and inner iframe(s)")
-            return false
+            return foundAny
         } catch (e: Exception) {
             android.util.Log.e("An1me_Video", "Error in loadLinks: ${e.message}", e)
             return false
         }
     }
 
-    /**
-     * Handle M3U8 master/variant playlists.
-     * If master playlist includes #EXT-X-STREAM-INF, add each variant.
-     * Otherwise, add the playlist URL as a single link.
-     */
     private suspend fun handleM3u8(videoUrl: String, callback: (ExtractorLink) -> Unit): Boolean {
         try {
-            val m3u8Response = app.get(videoUrl).text
-            val lines = m3u8Response.lines()
+            val response = app.get(videoUrl).text
+            val lines = response.lines()
             var foundVariant = false
 
-            lines.forEachIndexed { index, line ->
+            lines.forEachIndexed { i, line ->
                 if (line.startsWith("#EXT-X-STREAM-INF")) {
-                    val resolutionMatch = """RESOLUTION=\d+x(\d+)""".toRegex().find(line)
-                    val height = resolutionMatch?.groupValues?.get(1)?.toIntOrNull()
-                    val currentQuality = when (height) {
+                    val height = """RESOLUTION=\d+x(\d+)""".toRegex().find(line)?.groupValues?.get(1)?.toIntOrNull()
+                    val quality = when (height) {
                         2160 -> Qualities.P2160.value
                         1440 -> Qualities.P1440.value
                         1080 -> Qualities.P1080.value
@@ -283,49 +238,18 @@ class An1meProvider : MainAPI() {
                         360 -> Qualities.P360.value
                         else -> Qualities.Unknown.value
                     }
-                    val currentName = if (height != null) "${height}p" else "Unknown"
-
-                    if (index + 1 < lines.size) {
-                        val urlLine = lines[index + 1]
-                        if (!urlLine.startsWith("#")) {
-                            val fullUrl = if (urlLine.startsWith("http")) urlLine else {
-                                val baseUrl = videoUrl.substringBeforeLast("/")
-                                "$baseUrl/$urlLine"
-                            }
-                            val safeUrl = fullUrl.replace(" ", "%20").replace("[", "%5B").replace("]", "%5D")
-                            android.util.Log.d("An1me_Video", "Adding variant: $currentName -> $safeUrl")
-                            callback.invoke(
-                                createLink(
-                                    sourceName = name,
-                                    linkName = "$name $currentName",
-                                    url = safeUrl,
-                                    referer = mainUrl,
-                                    quality = currentQuality,
-                                    type = ExtractorLinkType.M3U8
-                                )
-                            )
-                            foundVariant = true
-                        }
+                    if (i + 1 < lines.size && !lines[i + 1].startsWith("#")) {
+                        val sub = lines[i + 1]
+                        val final = if (sub.startsWith("http")) sub else videoUrl.substringBeforeLast("/") + "/" + sub
+                        callback(createLink(name, "$name ${height ?: "?"}p", final, mainUrl, quality, ExtractorLinkType.M3U8))
+                        foundVariant = true
                     }
                 }
             }
 
-            // If no variant lines found, add playlist directly
             if (!foundVariant) {
-                val safeUrl = videoUrl.replace(" ", "%20").replace("[", "%5B").replace("]", "%5D")
-                android.util.Log.d("An1me_Video", "No variants in m3u8, adding master: $safeUrl")
-                callback.invoke(
-                    createLink(
-                        sourceName = name,
-                        linkName = name,
-                        url = safeUrl,
-                        referer = mainUrl,
-                        quality = Qualities.Unknown.value,
-                        type = ExtractorLinkType.M3U8
-                    )
-                )
+                callback(createLink(name, name, videoUrl, mainUrl, Qualities.Unknown.value, ExtractorLinkType.M3U8))
             }
-
             return true
         } catch (e: Exception) {
             android.util.Log.e("An1me_Video", "Error handling m3u8: ${e.message}", e)
