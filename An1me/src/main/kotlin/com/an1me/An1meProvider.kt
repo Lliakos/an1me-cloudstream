@@ -15,16 +15,23 @@ class An1meProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Anime)
 
     // Helper function to create extractor links without deprecation
-    private fun createLink(
-        sourceName: String,
-        linkName: String,
-        url: String,
-        referer: String,
-        quality: Int,
-        isM3u8: Boolean = false
-    ): ExtractorLink {
-        return newExtractorLink(this.name, linkName, url, referer, quality, isM3u8 = isM3u8)
-    }
+private fun createLink(
+    sourceName: String,
+    linkName: String,
+    url: String,
+    referer: String,
+    quality: Int
+): ExtractorLink {
+    return newExtractorLink(
+        source = sourceName,
+        name = linkName,
+        url = url,
+        referer = referer,
+        quality = quality
+    )
+}
+
+
 
     private fun Element.toSearchResult(): AnimeSearchResponse? {
         val link = this.selectFirst("a[href*='/anime/']") ?: return null
