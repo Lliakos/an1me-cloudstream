@@ -23,7 +23,7 @@ class An1meProvider : MainAPI() {
         quality: Int,
         isM3u8: Boolean = false
     ): ExtractorLink {
-        return ExtractorLink(sourceName, linkName, url, referer, quality, isM3u8)
+        return newExtractorLink(this.name, linkName, url, referer, quality, isM3u8 = isM3u8)
     }
 
     private fun Element.toSearchResult(): AnimeSearchResponse? {
