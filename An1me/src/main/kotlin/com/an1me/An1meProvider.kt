@@ -14,6 +14,18 @@ class An1meProvider : MainAPI() {
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Anime)
 
+    // Helper function to create extractor links without deprecation
+    private fun createLink(
+        sourceName: String,
+        linkName: String,
+        url: String,
+        referer: String,
+        quality: Int,
+        isM3u8: Boolean = false
+    ): ExtractorLink {
+        return ExtractorLink(sourceName, linkName, url, referer, quality, isM3u8)
+    }
+
     private fun Element.toSearchResult(): AnimeSearchResponse? {
         val link = this.selectFirst("a[href*='/anime/']") ?: return null
         val href = fixUrl(link.attr("href"))
@@ -175,7 +187,7 @@ class An1meProvider : MainAPI() {
                                         android.util.Log.d("An1me_Video", "Adding quality link: $currentName - $fullUrl")
                                         
                                         callback.invoke(
-                                            ExtractorLink(
+                                            createLink(
                                                 name,
                                                 "$name $currentName",
                                                 fullUrl,
@@ -193,7 +205,7 @@ class An1meProvider : MainAPI() {
                         if (lines.none { it.startsWith("#EXT-X-STREAM-INF") }) {
                             android.util.Log.d("An1me_Video", "No quality variants, adding master playlist")
                             callback.invoke(
-                                ExtractorLink(
+                                createLink(
                                     name,
                                     name,
                                     videoUrl,
@@ -209,7 +221,7 @@ class An1meProvider : MainAPI() {
                         android.util.Log.e("An1me_Video", "Failed to parse M3U8: ${e.message}")
                         // Last resort fallback
                         callback.invoke(
-                            ExtractorLink(
+                            createLink(
                                 name,
                                 name,
                                 videoUrl,
