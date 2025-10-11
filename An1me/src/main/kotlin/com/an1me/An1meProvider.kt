@@ -4,8 +4,6 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import java.util.Base64
-import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
 
 @Suppress("DEPRECATION")
 class An1meProvider : MainAPI() {
@@ -15,7 +13,6 @@ class An1meProvider : MainAPI() {
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Anime)
 
-    // Helper suspend function to safely create extractor links
     private suspend fun createLink(
         sourceName: String,
         linkName: String,
@@ -112,10 +109,6 @@ class An1meProvider : MainAPI() {
         }
     }
 
-    /**
-     * Core function: handle an1me.to links, decode base64,
-     * support WeTransfer and inner iframe extraction.
-     */
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -137,19 +130,23 @@ class An1meProvider : MainAPI() {
             val decodedUrl = String(Base64.getDecoder().decode(base64Part))
             android.util.Log.d("An1me_Video", "Decoded URL: $decodedUrl")
 
-            // If m3u8 directly
+            // M3U8 direct
             if (decodedUrl.contains(".m3u8")) {
                 return handleM3u8(decodedUrl, callback)
             }
 
-            // Handle WeTransfer boards
+            // ✅ FIXED: Handle WeTransfer
             if (decodedUrl.contains("wetransfer.com")) {
                 android.util.Log.d("An1me_Video", "Detected WeTransfer link, attempting extraction...")
+
                 val weDoc = app.get(decodedUrl).document
                 val nestedIframe = weDoc.selectFirst("iframe")?.attr("src")
                 val finalUrl = nestedIframe ?: decodedUrl
-                val finalDoc = app.get(finalUrl).document
-                val videoSources = finalDoc.select("video source[src]").map { it.attr("src") }
+
+                android.util.Log.d("An1me_Video", "WeTransfer iframe URL: $finalUrl")
+
+                val innerDoc = app.get(finalUrl, referer = decodedUrl).document
+                val videoSources = innerDoc.select("video source[src]").map { it.attr("src") }
 
                 if (videoSources.isNotEmpty()) {
                     videoSources.forEach { videoUrl ->
@@ -158,19 +155,20 @@ class An1meProvider : MainAPI() {
                                 sourceName = name,
                                 linkName = "$name (WeTransfer)",
                                 url = fixUrl(videoUrl),
-                                referer = decodedUrl,
+                                referer = finalUrl,
                                 quality = Qualities.Unknown.value,
                                 type = ExtractorLinkType.VIDEO
                             )
                         )
                     }
+                    android.util.Log.d("An1me_Video", "WeTransfer videos found: ${videoSources.size}")
                     return true
                 } else {
-                    android.util.Log.d("An1me_Video", "No MP4 found in WeTransfer page")
+                    android.util.Log.d("An1me_Video", "No MP4 found in WeTransfer iframe page")
                 }
             }
 
-            // Scan decodedUrl and inner iframe if any
+            // Normal extraction (Google Photos, MP4, M3U8)
             val pagesToScan = mutableListOf<Pair<String, String>>()
             pagesToScan.add(Pair(decodedUrl, mainUrl))
 
@@ -195,19 +193,16 @@ class An1meProvider : MainAPI() {
                     continue
                 }
 
-                // Googleusercontent
                 Regex("https://video\\.googleusercontent\\.com/[^\"'\\s]+").find(pageText)?.value?.let { gg ->
                     callback(createLink(name, "$name (Google Photos)", gg, pageUrl, Qualities.Unknown.value, ExtractorLinkType.VIDEO))
                     foundAny = true
                 }
 
-                // MP4
                 Regex("https?://[^\"'\\s]+\\.mp4[^\"'\\s]*").find(pageText)?.value?.let { mp4 ->
                     callback(createLink(name, "$name (MP4)", mp4, pageUrl, Qualities.Unknown.value, ExtractorLinkType.VIDEO))
                     foundAny = true
                 }
 
-                // M3U8
                 Regex("https?://[^\"'\\s]+\\.m3u8[^\"'\\s]*").find(pageText)?.value?.let { m3u8 ->
                     if (handleM3u8(m3u8, callback)) foundAny = true
                 }
