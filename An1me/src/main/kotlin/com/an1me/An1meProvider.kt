@@ -20,7 +20,7 @@ class An1meProvider : MainAPI() {
             val href = fixUrl(it.selectFirst(".film-detail .film-name a")?.attr("href") ?: return@mapNotNull null)
             val poster = it.selectFirst("img")?.attr("data-src") ?: ""
             newAnimeSearchResponse(title, href, TvType.Anime) {
-                this.posterUrl = poster
+                posterUrl = poster
             }
         }
     }
@@ -34,12 +34,15 @@ class An1meProvider : MainAPI() {
         val episodes = doc.select("div#episode_related li a").mapNotNull {
             val epHref = fixUrl(it.attr("href"))
             val epName = it.text()
-            newEpisode(epHref) { this.name = epName }
+            newEpisode(epHref) {
+                name = epName
+            }
         }
 
+        // ✅ All mutable assignments moved into builder
         return newAnimeLoadResponse(title, url, TvType.Anime) {
-            this.posterUrl = poster
-            this.plot = description
+            posterUrl = poster
+            plot = description
             addEpisodes(DubStatus.Subbed, episodes)
         }
     }
@@ -104,15 +107,15 @@ class An1meProvider : MainAPI() {
                                     .replace("[", "%5B")
                                     .replace("]", "%5D")
 
-                                callback.invoke(
+                                callback(
                                     newExtractorLink(
                                         name,
                                         "$name $currentName",
                                         safeUrl,
                                         ExtractorLinkType.M3U8
                                     ) {
-                                        this.quality = currentQuality
-                                        this.isM3u8 = true
+                                        quality = currentQuality
+                                        isM3u8 = true
                                     }
                                 )
                             }
@@ -125,15 +128,15 @@ class An1meProvider : MainAPI() {
                         .replace("[", "%5B")
                         .replace("]", "%5D")
 
-                    callback.invoke(
+                    callback(
                         newExtractorLink(
                             name,
                             name,
                             safeUrl,
                             ExtractorLinkType.M3U8
                         ) {
-                            this.quality = Qualities.Unknown.value
-                            this.isM3u8 = true
+                            quality = Qualities.Unknown.value
+                            isM3u8 = true
                         }
                     )
                 }
@@ -154,15 +157,15 @@ class An1meProvider : MainAPI() {
                 if (!videoDirect.isNullOrEmpty()) {
                     android.util.Log.d("An1me_Video", "Extracted direct video: $videoDirect")
 
-                    callback.invoke(
+                    callback(
                         newExtractorLink(
                             name,
                             "$name GoogleVideo",
                             videoDirect,
-                            ExtractorLinkType.VIDEO // ✅ fixed from DIRECT
+                            ExtractorLinkType.VIDEO
                         ) {
-                            this.quality = Qualities.Unknown.value
-                            this.isM3u8 = false
+                            quality = Qualities.Unknown.value
+                            isM3u8 = false
                         }
                     )
                     return true
