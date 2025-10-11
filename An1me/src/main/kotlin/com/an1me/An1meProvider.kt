@@ -132,7 +132,7 @@ class An1meProvider : MainAPI() {
             val decodedUrl = String(Base64.getDecoder().decode(base64Part))
             android.util.Log.d("An1me_Video", "Decoded URL: $decodedUrl")
 
-            // Handle M3U8 files as before
+            // Handle M3U8 files
             if (decodedUrl.contains(".m3u8")) {
                 return handleM3u8(decodedUrl, callback)
             }
@@ -142,14 +142,11 @@ class An1meProvider : MainAPI() {
                 android.util.Log.d("An1me_Video", "Detected Google Photos link, fetching MP4...")
 
                 val photoPage = app.get(decodedUrl, referer = mainUrl).text
-
-                // Extract direct video URL
                 val regex = Regex("https://video\\.googleusercontent\\.com/[^\"']+")
                 val videoMatch = regex.find(photoPage)?.value
 
                 if (videoMatch != null) {
                     android.util.Log.d("An1me_Video", "Found Google Photos MP4: $videoMatch")
-
                     callback.invoke(
                         createLink(
                             sourceName = name,
@@ -162,6 +159,31 @@ class An1meProvider : MainAPI() {
                     return true
                 } else {
                     android.util.Log.d("An1me_Video", "No MP4 found in Google Photos page")
+                }
+            }
+
+            // Handle WeTransfer links
+            if (decodedUrl.contains("wetransfer.com")) {
+                android.util.Log.d("An1me_Video", "Detected WeTransfer link, attempting extraction...")
+
+                val weTransferPage = app.get(decodedUrl, referer = mainUrl).text
+                val regex = Regex("https://[^\"]+\\.mp4")
+                val mp4Match = regex.find(weTransferPage)?.value
+
+                if (mp4Match != null) {
+                    android.util.Log.d("An1me_Video", "Found WeTransfer MP4: $mp4Match")
+                    callback.invoke(
+                        createLink(
+                            sourceName = name,
+                            linkName = "$name (WeTransfer)",
+                            url = mp4Match,
+                            referer = decodedUrl,
+                            quality = Qualities.Unknown.value
+                        )
+                    )
+                    return true
+                } else {
+                    android.util.Log.d("An1me_Video", "No MP4 found in WeTransfer page")
                 }
             }
 
