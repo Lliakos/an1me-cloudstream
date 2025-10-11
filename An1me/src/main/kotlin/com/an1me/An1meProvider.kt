@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import java.util.Base64
+import java.net.URLEncoder
 
 class An1meProvider : MainAPI() {
     override var mainUrl = "https://an1me.to"
@@ -121,25 +122,36 @@ class An1meProvider : MainAPI() {
             val decodedUrl = String(Base64.getDecoder().decode(base64Part))
             android.util.Log.d("An1me_Video", "Decoded URL: $decodedUrl")
             
+            // The URL is already percent-encoded (%5B = [, %5D = ]), so it should work
+            // But if M3u8Helper has issues, we keep the URL as-is since it's already encoded
+            val videoUrl = decodedUrl
+            
             when {
-                // Direct M3U8 file - use it directly!
-                decodedUrl.contains(".m3u8") -> {
-                    android.util.Log.d("An1me_Video", "Direct M3U8 link found, generating links")
-                    val links = M3u8Helper.generateM3u8(
-                        source = name,
-                        streamUrl = decodedUrl,
-                        referer = mainUrl
+                // Direct M3U8 file
+                videoUrl.contains(".m3u8") -> {
+                    android.util.Log.d("An1me_Video", "Direct M3U8 link found")
+                    android.util.Log.d("An1me_Video", "Video URL: $videoUrl")
+                    
+                    // Add the M3U8 URL directly - let the player handle it
+                    callback.invoke(
+                        ExtractorLink(
+                            source = name,
+                            name = name,
+                            url = videoUrl,
+                            referer = mainUrl,
+                            quality = Qualities.Unknown.value,
+                            isM3u8 = true
+                        )
                     )
-                    android.util.Log.d("An1me_Video", "Generated ${links.size} M3U8 links")
-                    links.forEach(callback)
+                    android.util.Log.d("An1me_Video", "Added M3U8 link successfully")
                     return true
                 }
                 
                 // If it's not a direct video URL, it might be an iframe page
-                decodedUrl.startsWith("http") && !decodedUrl.contains(".m3u8") -> {
+                videoUrl.startsWith("http") && !videoUrl.contains(".m3u8") -> {
                     android.util.Log.d("An1me_Video", "Loading iframe page to extract video")
                     
-                    val iframeDoc = app.get(decodedUrl).document
+                    val iframeDoc = app.get(videoUrl).document
                     val scripts = iframeDoc.select("script")
                     android.util.Log.d("An1me_Video", "Found ${scripts.size} script tags")
                     
@@ -161,16 +173,16 @@ class An1meProvider : MainAPI() {
                     for (pattern in patterns) {
                         val match = pattern.toRegex().find(scriptText)
                         if (match != null) {
-                            val videoUrl = match.groupValues.getOrNull(1)?.let {
+                            val extractedUrl = match.groupValues.getOrNull(1)?.let {
                                 it.replace("\\/", "/").replace("\\", "")
                             } ?: match.value
                             
-                            android.util.Log.d("An1me_Video", "Extracted video URL: $videoUrl")
+                            android.util.Log.d("An1me_Video", "Extracted video URL: $extractedUrl")
                             
                             M3u8Helper.generateM3u8(
                                 source = name,
-                                streamUrl = videoUrl,
-                                referer = decodedUrl
+                                streamUrl = extractedUrl,
+                                referer = videoUrl
                             ).forEach(callback)
                             return true
                         }
