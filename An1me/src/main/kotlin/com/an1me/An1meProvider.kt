@@ -13,6 +13,7 @@ class An1meProvider : MainAPI() {
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Anime)
 
+    // Helper suspend function to safely create extractor links
     private suspend fun createLink(
         sourceName: String,
         linkName: String,
@@ -109,6 +110,10 @@ class An1meProvider : MainAPI() {
         }
     }
 
+    /**
+     * Core function: handle an1me.to links, decode base64,
+     * support WeTransfer and inner iframe extraction.
+     */
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -130,59 +135,76 @@ class An1meProvider : MainAPI() {
             val decodedUrl = String(Base64.getDecoder().decode(base64Part))
             android.util.Log.d("An1me_Video", "Decoded URL: $decodedUrl")
 
-            // If m3u8 directly
-            if (decodedUrl.contains(".m3u8")) {
-                return handleM3u8(decodedUrl, callback)
-            }
-
-            // ✅ FIX: Robust WeTransfer parsing
+            // ✅ Handle WeTransfer (fixed)
             if (decodedUrl.contains("wetransfer.com")) {
                 android.util.Log.d("An1me_Video", "Detected WeTransfer link, attempting extraction...")
 
-                val weDoc = app.get(decodedUrl).document
-                val nestedIframe = weDoc.selectFirst("iframe")?.attr("src")
-                val finalUrl = nestedIframe ?: decodedUrl
+                try {
+                    // 1️⃣ Get the main WeTransfer board page
+                    val mainDoc = app.get(decodedUrl).document
 
-                android.util.Log.d("An1me_Video", "WeTransfer iframe URL: $finalUrl")
+                    // 2️⃣ Find inner iframe (where the video is actually loaded)
+                    val iframeSrc = mainDoc.selectFirst("iframe")?.attr("src")
+                    val iframeUrl = iframeSrc ?: decodedUrl
+                    android.util.Log.d("An1me_Video", "WeTransfer iframe URL: $iframeUrl")
 
-                val innerResponse = app.get(finalUrl, referer = decodedUrl)
-                val innerHtml = innerResponse.text
+                    // 3️⃣ Get iframe HTML as plain text
+                    val iframeHtml = app.get(iframeUrl, referer = decodedUrl).text
 
-                val videoSources = Regex("""<source[^>]+src=["']([^"']+\.mp4[^"']*)["']""")
-                    .findAll(innerHtml)
-                    .map { it.groupValues[1] }
-                    .toList()
+                    // 4️⃣ Extract JSON from "const params = {...}"
+                    val jsonData = Regex("""const\s+params\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL)
+                        .find(iframeHtml)
+                        ?.groupValues?.get(1)
 
-                val fallbackMatches = if (videoSources.isEmpty()) {
-                    Regex("""https?://[^\s"'<>]+(?:\.mp4|\.m3u8)[^\s"'<>]*""")
-                        .findAll(innerHtml)
-                        .map { it.value }
-                        .toList()
-                } else emptyList()
+                    if (jsonData == null) {
+                        android.util.Log.d("An1me_Video", "No JSON params found in iframe page")
+                        return false
+                    }
 
-                val allLinks = (videoSources + fallbackMatches).distinct()
+                    android.util.Log.d("An1me_Video", "Found WeTransfer params JSON")
 
-                if (allLinks.isNotEmpty()) {
-                    allLinks.forEach { videoUrl ->
+                    // 5️⃣ Find all URLs in that JSON
+                    val urlMatches = Regex(""""url"\s*:\s*"([^"]+)"""").findAll(jsonData)
+                    val foundUrls = urlMatches.map { it.groupValues[1].replace("\\/", "/") }.toList()
+
+                    if (foundUrls.isEmpty()) {
+                        android.util.Log.d("An1me_Video", "No URLs found in WeTransfer params JSON")
+                        return false
+                    }
+
+                    foundUrls.forEach { videoUrl ->
+                        android.util.Log.d("An1me_Video", "Found WeTransfer video URL: $videoUrl")
+
                         callback(
                             createLink(
                                 sourceName = name,
                                 linkName = "$name (WeTransfer)",
-                                url = fixUrl(videoUrl),
-                                referer = finalUrl,
-                                quality = Qualities.Unknown.value,
-                                type = if (videoUrl.endsWith(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                url = videoUrl,
+                                referer = iframeUrl,
+                                quality = when {
+                                    videoUrl.contains("1080", true) -> Qualities.P1080.value
+                                    videoUrl.contains("720", true) -> Qualities.P720.value
+                                    videoUrl.contains("480", true) -> Qualities.P480.value
+                                    else -> Qualities.Unknown.value
+                                },
+                                type = ExtractorLinkType.VIDEO
                             )
                         )
                     }
-                    android.util.Log.d("An1me_Video", "WeTransfer videos found: ${allLinks.size}")
+
                     return true
-                } else {
-                    android.util.Log.d("An1me_Video", "No video URLs found in WeTransfer page")
+                } catch (e: Exception) {
+                    android.util.Log.e("An1me_Video", "Error parsing WeTransfer iframe: ${e.message}", e)
+                    return false
                 }
             }
 
-            // Continue scanning decoded URL
+            // ✅ M3U8 handler
+            if (decodedUrl.contains(".m3u8")) {
+                return handleM3u8(decodedUrl, callback)
+            }
+
+            // ✅ Google / MP4 fallback
             val pagesToScan = mutableListOf<Pair<String, String>>()
             pagesToScan.add(Pair(decodedUrl, mainUrl))
 
