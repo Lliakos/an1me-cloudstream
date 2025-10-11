@@ -131,74 +131,79 @@ class An1meProvider : MainAPI() {
             android.util.Log.d("An1me_Video", "Decoded URL: $decodedUrl")
 
             // Handle WeTransfer links properly
-            // Handle WeTransfer boards (fully fixed)
-    if (decodedUrl.contains("wetransfer.com")) {
-        android.util.Log.d("An1me_Video", "Detected WeTransfer link, attempting extraction...")
+            if (decodedUrl.contains("wetransfer.com")) {
+                android.util.Log.d("An1me_Video", "Detected WeTransfer link, attempting extraction...")
 
-        try {
-            val mainDoc = app.get(decodedUrl)
-            val iframeSrc2 = mainDoc.document.selectFirst("iframe")?.attr("src")
-            val iframeUrl = iframeSrc2 ?: decodedUrl
-            android.util.Log.d("An1me_Video", "WeTransfer iframe URL: $iframeUrl")
+                try {
+                    val mainDoc = app.get(decodedUrl)
+                    val iframeSrc2 = mainDoc.document.selectFirst("iframe")?.attr("src")
+                    val iframeUrl = iframeSrc2 ?: decodedUrl
+                    android.util.Log.d("An1me_Video", "WeTransfer iframe URL: $iframeUrl")
 
-            val iframeHtml = app.get(iframeUrl, referer = decodedUrl).text
+                    val iframeHtml = app.get(iframeUrl, referer = decodedUrl).text
 
-            // 🔧 Deep-clean HTML escapes and JS escapes
-            val cleanedHtml = iframeHtml
-                .replace("&quot;", "\"")
-                .replace("&amp;", "&")
-                .replace("&lt;", "<")
-                .replace("&gt;", ">")
-                .replace("\\u003c", "<")
-                .replace("\\u003e", ">")
-                .replace("\\\\", "\\") // handle double escapes
-                .replace("\\/", "/")
+                    val cleanedHtml = iframeHtml
+                        .replace("&quot;", "\"")
+                        .replace("&amp;", "&")
+                        .replace("&lt;", "<")
+                        .replace("&gt;", ">")
+                        .replace("\\u003c", "<")
+                        .replace("\\u003e", ">")
+                        .replace("\\\\", "\\")
+                        .replace("\\/", "/")
 
-            // 🔍 More flexible pattern for params object
-            val jsonData = Regex("""params\s*=\s*(\{.*?"sources".*?\});""", RegexOption.DOT_MATCHES_ALL)
-                .find(cleanedHtml)
-                ?.groupValues?.get(1)
+                    val jsonData = Regex("""params\s*=\s*(\{.*?"sources".*?\});""", RegexOption.DOT_MATCHES_ALL)
+                        .find(cleanedHtml)
+                        ?.groupValues?.get(1)
 
-            if (jsonData == null) {
-                android.util.Log.d("An1me_Video", "No JSON params found even after deep cleaning")
-                return false
+                    if (jsonData == null) {
+                        android.util.Log.d("An1me_Video", "No JSON params found even after deep cleaning")
+                        return false
+                    }
+
+                    android.util.Log.d("An1me_Video", "Found WeTransfer params JSON")
+
+                    val urlMatches = Regex(""""url"\s*:\s*"([^"]+)"""").findAll(jsonData)
+                    val foundUrls = urlMatches.map { it.groupValues[1].replace("\\/", "/") }.toList()
+
+                    if (foundUrls.isEmpty()) {
+                        android.util.Log.d("An1me_Video", "No URLs found inside JSON params")
+                        return false
+                    }
+
+                    foundUrls.forEach { videoUrl ->
+                        android.util.Log.d("An1me_Video", "Found WeTransfer video URL: $videoUrl")
+
+                        callback(
+                            createLink(
+                                sourceName = name,
+                                linkName = "$name (WeTransfer)",
+                                url = videoUrl,
+                                referer = iframeUrl,
+                                quality = when {
+                                    videoUrl.contains("1080", true) -> Qualities.P1080.value
+                                    videoUrl.contains("720", true) -> Qualities.P720.value
+                                    videoUrl.contains("480", true) -> Qualities.P480.value
+                                    else -> Qualities.Unknown.value
+                                },
+                                type = ExtractorLinkType.VIDEO
+                            )
+                        )
+                    }
+
+                    return true
+
+                } catch (e: Exception) {
+                    android.util.Log.e("An1me_Video", "Error parsing WeTransfer iframe: ${e.message}", e)
+                    return false
+                }
             }
 
-            android.util.Log.d("An1me_Video", "Found WeTransfer params JSON")
-
-            // Extract URLs (robustly)
-            val urlMatches = Regex(""""url"\s*:\s*"([^"]+)"""").findAll(jsonData)
-            val foundUrls = urlMatches.map { it.groupValues[1].replace("\\/", "/") }.toList()
-
-            if (foundUrls.isEmpty()) {
-                android.util.Log.d("An1me_Video", "No URLs found inside JSON params")
-                return false
-            }
-
-            foundUrls.forEach { videoUrl ->
-                android.util.Log.d("An1me_Video", "Found WeTransfer video URL: $videoUrl")
-
-                callback(
-                    createLink(
-                        sourceName = name,
-                        linkName = "$name (WeTransfer)",
-                        url = videoUrl,
-                        referer = iframeUrl,
-                        quality = when {
-                            videoUrl.contains("1080", true) -> Qualities.P1080.value
-                            videoUrl.contains("720", true) -> Qualities.P720.value
-                            videoUrl.contains("480", true) -> Qualities.P480.value
-                            else -> Qualities.Unknown.value
-                        },
-                        type = ExtractorLinkType.VIDEO
-                    )
-                )
-            }
-
-            return true
+            // If not WeTransfer, return false
+            return false
 
         } catch (e: Exception) {
-            android.util.Log.e("An1me_Video", "Error parsing WeTransfer iframe: ${e.message}", e)
+            android.util.Log.e("An1me_Video", "Error loading links: ${e.message}", e)
             return false
         }
     }
