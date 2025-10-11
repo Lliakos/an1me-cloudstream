@@ -39,7 +39,6 @@ class An1meProvider : MainAPI() {
             }
         }
 
-        // ✅ no reassignment — all inside builder
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = poster
             this.plot = description
@@ -105,34 +104,34 @@ class An1meProvider : MainAPI() {
                                     .replace("]", "%5D")
 
                                 callback(
-                                    ExtractorLink(
-                                        this.name,
-                                        "${this.name} ${height}p",
-                                        safeUrl,
-                                        "",
-                                        quality = currentQuality,
+                                    newExtractorLink {
+                                        source = this@An1meProvider.name
+                                        name = "${this@An1meProvider.name} ${height}p"
+                                        url = safeUrl
+                                        referer = mainUrl
+                                        quality = currentQuality
                                         isM3u8 = true
-                                    )
+                                    }
                                 )
                             }
                         }
                     }
                 }
 
-                // if playlist is simple, just use it directly
+                // Handle simple playlists
                 if (lines.none { it.startsWith("#EXT-X-STREAM-INF") }) {
                     val safeUrl = videoUrl
                         .replace(" ", "%20")
                         .replace("[", "%5B")
                         .replace("]", "%5D")
                     callback(
-                        ExtractorLink(
-                            this.name,
-                            this.name,
-                            safeUrl,
-                            "",
+                        newExtractorLink {
+                            source = this@An1meProvider.name
+                            name = this@An1meProvider.name
+                            url = safeUrl
+                            referer = mainUrl
                             isM3u8 = true
-                        )
+                        }
                     )
                 }
 
@@ -148,13 +147,12 @@ class An1meProvider : MainAPI() {
 
                 if (!directVideo.isNullOrEmpty()) {
                     callback(
-                        ExtractorLink(
-                            this.name,
-                            "${this.name} GoogleVideo",
-                            directVideo,
-                            "",
-                            isM3u8 = false
-                        )
+                        newExtractorLink {
+                            source = this@An1meProvider.name
+                            name = "${this@An1meProvider.name} GoogleVideo"
+                            url = directVideo
+                            referer = mainUrl
+                        }
                     )
                     return true
                 }
