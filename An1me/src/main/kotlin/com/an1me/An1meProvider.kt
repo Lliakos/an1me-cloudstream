@@ -8,8 +8,8 @@ import java.util.Base64
 class An1meProvider : MainAPI() {
     override var mainUrl = "https://an1me.to"
     override var name = "An1me"
-    override var hasMainPage = true
     override var lang = "en"
+    override var hasMainPage = true
     override var supportedTypes = setOf(TvType.Anime)
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -74,13 +74,11 @@ class An1meProvider : MainAPI() {
                 val m3u8Text = app.get(videoUrl).text
                 val lines = m3u8Text.lines()
 
-                var currentQuality = Qualities.Unknown.value
-
                 lines.forEachIndexed { i, line ->
                     if (line.startsWith("#EXT-X-STREAM-INF")) {
                         val resMatch = """RESOLUTION=\d+x(\d+)""".toRegex().find(line)
                         val height = resMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                        currentQuality = when (height) {
+                        val quality = when (height) {
                             2160 -> Qualities.P2160.value
                             1440 -> Qualities.P1440.value
                             1080 -> Qualities.P1080.value
@@ -104,14 +102,14 @@ class An1meProvider : MainAPI() {
                                     .replace("]", "%5D")
 
                                 callback(
-                                    newExtractorLink {
-                                        source = this@An1meProvider.name
-                                        name = "${this@An1meProvider.name} ${height}p"
-                                        url = safeUrl
-                                        referer = mainUrl
-                                        quality = currentQuality
+                                    newExtractorLink(
+                                        source = name,
+                                        name = "${name} ${height}p",
+                                        url = safeUrl,
+                                        referer = mainUrl,
+                                        quality = quality,
                                         isM3u8 = true
-                                    }
+                                    )
                                 )
                             }
                         }
@@ -125,13 +123,13 @@ class An1meProvider : MainAPI() {
                         .replace("[", "%5B")
                         .replace("]", "%5D")
                     callback(
-                        newExtractorLink {
-                            source = this@An1meProvider.name
-                            name = this@An1meProvider.name
-                            url = safeUrl
-                            referer = mainUrl
+                        newExtractorLink(
+                            source = name,
+                            name = name,
+                            url = safeUrl,
+                            referer = mainUrl,
                             isM3u8 = true
-                        }
+                        )
                     )
                 }
 
@@ -147,12 +145,12 @@ class An1meProvider : MainAPI() {
 
                 if (!directVideo.isNullOrEmpty()) {
                     callback(
-                        newExtractorLink {
-                            source = this@An1meProvider.name
-                            name = "${this@An1meProvider.name} GoogleVideo"
-                            url = directVideo
+                        newExtractorLink(
+                            source = name,
+                            name = "${name} GoogleVideo",
+                            url = directVideo,
                             referer = mainUrl
-                        }
+                        )
                     )
                     return true
                 }
