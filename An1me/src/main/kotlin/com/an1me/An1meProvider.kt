@@ -69,7 +69,7 @@ class An1meProvider : MainAPI() {
 
             val videoUrl = decodedUrl
 
-            // 🟢 Handle direct .m3u8
+            // Handle M3U8 playlists
             if (videoUrl.contains(".m3u8")) {
                 val m3u8Text = app.get(videoUrl).text
                 val lines = m3u8Text.lines()
@@ -105,18 +105,19 @@ class An1meProvider : MainAPI() {
                                     newExtractorLink(
                                         source = name,
                                         name = "${name} ${height}p",
-                                        url = safeUrl,
-                                        referer = mainUrl,
-                                        quality = quality,
-                                        isM3u8 = true
-                                    )
+                                        url = safeUrl
+                                    ) {
+                                        // Set optional fields inside the lambda
+                                        headers = mapOf("Referer" to mainUrl)
+                                        this.quality = quality
+                                        this.isM3u8 = true
+                                    }
                                 )
                             }
                         }
                     }
                 }
 
-                // Handle simple playlists
                 if (lines.none { it.startsWith("#EXT-X-STREAM-INF") }) {
                     val safeUrl = videoUrl
                         .replace(" ", "%20")
@@ -126,17 +127,17 @@ class An1meProvider : MainAPI() {
                         newExtractorLink(
                             source = name,
                             name = name,
-                            url = safeUrl,
-                            referer = mainUrl,
+                            url = safeUrl
+                        ) {
+                            headers = mapOf("Referer" to mainUrl)
                             isM3u8 = true
-                        )
+                        }
                     )
                 }
-
                 return true
             }
 
-            // 🟡 Handle Google Photos embeds
+            // Handle Google Photos videos
             if (videoUrl.contains("photos.google.com")) {
                 val photoDoc = app.get(videoUrl, referer = mainUrl).document
                 val directVideo =
@@ -148,9 +149,10 @@ class An1meProvider : MainAPI() {
                         newExtractorLink(
                             source = name,
                             name = "${name} GoogleVideo",
-                            url = directVideo,
-                            referer = mainUrl
-                        )
+                            url = directVideo
+                        ) {
+                            headers = mapOf("Referer" to mainUrl)
+                        }
                     )
                     return true
                 }
