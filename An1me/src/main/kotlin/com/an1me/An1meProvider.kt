@@ -132,78 +132,37 @@ class An1meProvider : MainAPI() {
             val decodedUrl = String(Base64.getDecoder().decode(base64Part))
             android.util.Log.d("An1me_Video", "Decoded URL: $decodedUrl")
 
-            val videoUrl = decodedUrl
+            // Handle M3U8 files as before
+            if (decodedUrl.contains(".m3u8")) {
+                return handleM3u8(decodedUrl, callback)
+            }
 
-            if (videoUrl.contains(".m3u8")) {
-                android.util.Log.d("An1me_Video", "Direct M3U8 link found, generating links")
+            // Handle Google Photos videos
+            if (decodedUrl.contains("photos.google.com")) {
+                android.util.Log.d("An1me_Video", "Detected Google Photos link, fetching MP4...")
 
-                val m3u8Response = app.get(videoUrl).text
-                val lines = m3u8Response.lines()
-                var currentQuality = Qualities.Unknown.value
-                var currentName = "Unknown"
+                val photoPage = app.get(decodedUrl, referer = mainUrl).text
 
-                lines.forEachIndexed { index, line ->
-                    if (line.startsWith("#EXT-X-STREAM-INF")) {
-                        val resolutionMatch = """RESOLUTION=\d+x(\d+)""".toRegex().find(line)
-                        val height = resolutionMatch?.groupValues?.get(1)?.toIntOrNull()
-                        currentQuality = when (height) {
-                            2160 -> Qualities.P2160.value
-                            1440 -> Qualities.P1440.value
-                            1080 -> Qualities.P1080.value
-                            720 -> Qualities.P720.value
-                            480 -> Qualities.P480.value
-                            360 -> Qualities.P360.value
-                            else -> Qualities.Unknown.value
-                        }
-                        currentName = "${height}p"
+                // Extract direct video URL
+                val regex = Regex("https://video\\.googleusercontent\\.com/[^\"']+")
+                val videoMatch = regex.find(photoPage)?.value
 
-                        if (index + 1 < lines.size) {
-                            var urlLine = lines[index + 1]
-                            if (!urlLine.startsWith("#")) {
-                                val fullUrl = if (urlLine.startsWith("http")) urlLine else {
-                                    val baseUrl = videoUrl.substringBeforeLast("/")
-                                    "$baseUrl/$urlLine"
-                                }
-
-                                // Encode unsafe characters like [ ] and spaces
-                                val safeUrl = fullUrl.replace(" ", "%20")
-                                    .replace("[", "%5B")
-                                    .replace("]", "%5D")
-
-                                android.util.Log.d("An1me_Video", "Adding quality link: $currentName - $safeUrl")
-
-                                callback.invoke(
-                                    createLink(
-                                        name,
-                                        "$name $currentName",
-                                        safeUrl,
-                                        mainUrl,
-                                        currentQuality
-                                    )
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // Fallback: add master playlist directly if no variants
-                if (lines.none { it.startsWith("#EXT-X-STREAM-INF") }) {
-                    val safeUrl = videoUrl.replace(" ", "%20")
-                        .replace("[", "%5B")
-                        .replace("]", "%5D")
+                if (videoMatch != null) {
+                    android.util.Log.d("An1me_Video", "Found Google Photos MP4: $videoMatch")
 
                     callback.invoke(
                         createLink(
-                            name,
-                            name,
-                            safeUrl,
-                            mainUrl,
-                            Qualities.Unknown.value
+                            sourceName = name,
+                            linkName = "$name (Google Photos)",
+                            url = videoMatch,
+                            referer = decodedUrl,
+                            quality = Qualities.Unknown.value
                         )
                     )
+                    return true
+                } else {
+                    android.util.Log.d("An1me_Video", "No MP4 found in Google Photos page")
                 }
-
-                return true
             }
 
             return false
@@ -211,5 +170,71 @@ class An1meProvider : MainAPI() {
             android.util.Log.e("An1me_Video", "Error: ${e.message}", e)
             return false
         }
+    }
+
+    private suspend fun handleM3u8(videoUrl: String, callback: (ExtractorLink) -> Unit): Boolean {
+        val m3u8Response = app.get(videoUrl).text
+        val lines = m3u8Response.lines()
+        var currentQuality = Qualities.Unknown.value
+        var currentName = "Unknown"
+
+        lines.forEachIndexed { index, line ->
+            if (line.startsWith("#EXT-X-STREAM-INF")) {
+                val resolutionMatch = """RESOLUTION=\d+x(\d+)""".toRegex().find(line)
+                val height = resolutionMatch?.groupValues?.get(1)?.toIntOrNull()
+                currentQuality = when (height) {
+                    2160 -> Qualities.P2160.value
+                    1440 -> Qualities.P1440.value
+                    1080 -> Qualities.P1080.value
+                    720 -> Qualities.P720.value
+                    480 -> Qualities.P480.value
+                    360 -> Qualities.P360.value
+                    else -> Qualities.Unknown.value
+                }
+                currentName = "${height}p"
+
+                if (index + 1 < lines.size) {
+                    var urlLine = lines[index + 1]
+                    if (!urlLine.startsWith("#")) {
+                        val fullUrl = if (urlLine.startsWith("http")) urlLine else {
+                            val baseUrl = videoUrl.substringBeforeLast("/")
+                            "$baseUrl/$urlLine"
+                        }
+
+                        val safeUrl = fullUrl.replace(" ", "%20")
+                            .replace("[", "%5B")
+                            .replace("]", "%5D")
+
+                        callback.invoke(
+                            createLink(
+                                sourceName = name,
+                                linkName = "$name $currentName",
+                                url = safeUrl,
+                                referer = mainUrl,
+                                quality = currentQuality
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
+        if (lines.none { it.startsWith("#EXT-X-STREAM-INF") }) {
+            val safeUrl = videoUrl.replace(" ", "%20")
+                .replace("[", "%5B")
+                .replace("]", "%5D")
+
+            callback.invoke(
+                createLink(
+                    sourceName = name,
+                    linkName = name,
+                    url = safeUrl,
+                    referer = mainUrl,
+                    quality = Qualities.Unknown.value
+                )
+            )
+        }
+
+        return true
     }
 }
