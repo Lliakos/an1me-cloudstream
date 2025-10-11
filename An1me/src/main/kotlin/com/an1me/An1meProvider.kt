@@ -159,7 +159,7 @@ class An1meProvider : MainAPI() {
                             name,
                             "$name GoogleVideo",
                             videoDirect,
-                            ExtractorLinkType.DIRECT
+                            ExtractorLinkType.VIDEO // ✅ fixed from DIRECT
                         ) {
                             this.quality = Qualities.Unknown.value
                             this.isM3u8 = false
