@@ -16,9 +16,9 @@ class An1meProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Anime)
 
     // Suspend helper for creating extractor links
-    private suspend fun createLink(sourceName: String, linkName: String, url: String): ExtractorLink {
+    private suspend fun createLink(linkName: String, url: String): ExtractorLink {
         return newExtractorLink(
-            source = sourceName,
+            source = name,
             name = linkName,
             url = url
         )
@@ -129,9 +129,12 @@ class An1meProvider : MainAPI() {
             // Google Photos link
             if (decodedUrl.contains("photos.google.com")) {
                 callback(
-                    newExtractorLink(source, "Google Photos", decodedUrl) {
-                        this.isM3u8 = false
-                    }
+                    newExtractorLink(
+                        source = name,
+                        name = "Google Photos",
+                        url = decodedUrl,
+                        isM3u8 = false
+                    )
                 )
                 return true
             }
