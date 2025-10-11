@@ -21,13 +21,14 @@ class An1meProvider : MainAPI() {
         linkName: String,
         url: String,
         referer: String,
-        quality: Int
+        quality: Int,
+        type: ExtractorLinkType = ExtractorLinkType.M3U8
     ): ExtractorLink {
         return newExtractorLink(
             source = sourceName,
             name = linkName,
             url = url,
-            type = ExtractorLinkType.M3U8
+            type = type
         ) {
             this.referer = referer
             this.quality = quality
@@ -153,7 +154,8 @@ class An1meProvider : MainAPI() {
                             linkName = "$name (Google Photos)",
                             url = videoMatch,
                             referer = decodedUrl,
-                            quality = Qualities.Unknown.value
+                            quality = Qualities.Unknown.value,
+                            type = ExtractorLinkType.Other
                         )
                     )
                     return true
@@ -162,29 +164,125 @@ class An1meProvider : MainAPI() {
                 }
             }
 
-            // Handle WeTransfer links
-            if (decodedUrl.contains("wetransfer.com")) {
-                android.util.Log.d("An1me_Video", "Detected WeTransfer link, attempting extraction...")
+            // Handle WeTransfer links (more robust extraction)
+            if (decodedUrl.contains("wetransfer.com") || decodedUrl.contains("collect.wetransfer.com")) {
+                android.util.Log.d("An1me_Video", "Detected WeTransfer link, attempting robust extraction...")
 
                 val weTransferPage = app.get(decodedUrl, referer = mainUrl).text
-                val regex = Regex("https://[^\"]+\\.mp4")
-                val mp4Match = regex.find(weTransferPage)?.value
 
-                if (mp4Match != null) {
-                    android.util.Log.d("An1me_Video", "Found WeTransfer MP4: $mp4Match")
+                // 1) Search for typical direct MP4 URLs
+                val directMp4Regex = Regex("https?://[^\"'\\s>]+\\.(mp4|m4v)(\\?[^\"'\\s>]*)?", RegexOption.IGNORE_CASE)
+                val directMatch = directMp4Regex.find(weTransferPage)?.value
+                if (directMatch != null) {
+                    android.util.Log.d("An1me_Video", "Found direct MP4 via simple regex: $directMatch")
                     callback.invoke(
                         createLink(
                             sourceName = name,
                             linkName = "$name (WeTransfer)",
-                            url = mp4Match,
+                            url = directMatch,
                             referer = decodedUrl,
-                            quality = Qualities.Unknown.value
+                            quality = Qualities.Unknown.value,
+                            type = ExtractorLinkType.Other
                         )
                     )
                     return true
-                } else {
-                    android.util.Log.d("An1me_Video", "No MP4 found in WeTransfer page")
                 }
+
+                // 2) Look for JSON-like url fields (escaped or unescaped). Example: "url":"https://...mp4" or url":"https:\/\/...mp4
+                val jsonUrlRegex = Regex("""["']url["']\s*:\s*["'](https?:\\?/\\?/[^"']+?\.(mp4|m4v)[^"']*)["']""", RegexOption.IGNORE_CASE)
+                val jsonMatch = jsonUrlRegex.find(weTransferPage)?.groups?.get(1)?.value
+                val unescapedJsonMatch = jsonMatch?.replace("\\/", "/")
+                if (unescapedJsonMatch != null) {
+                    android.util.Log.d("An1me_Video", "Found MP4 in JSON-like content: $unescapedJsonMatch")
+                    callback.invoke(
+                        createLink(
+                            sourceName = name,
+                            linkName = "$name (WeTransfer JSON)",
+                            url = unescapedJsonMatch,
+                            referer = decodedUrl,
+                            quality = Qualities.Unknown.value,
+                            type = ExtractorLinkType.Other
+                        )
+                    )
+                    return true
+                }
+
+                // 3) Another JSON pattern without escaping
+                val jsonUrlRegex2 = Regex("url\\s*[:=]\\s*\"(https?://[^\"]+\\.(mp4|m4v)[^\"]*)\"", RegexOption.IGNORE_CASE)
+                val jsonMatch2 = jsonUrlRegex2.find(weTransferPage)?.groups?.get(1)?.value
+                if (jsonMatch2 != null) {
+                    android.util.Log.d("An1me_Video", "Found MP4 in JSON-like content (2): $jsonMatch2")
+                    callback.invoke(
+                        createLink(
+                            sourceName = name,
+                            linkName = "$name (WeTransfer JSON2)",
+                            url = jsonMatch2,
+                            referer = decodedUrl,
+                            quality = Qualities.Unknown.value,
+                            type = ExtractorLinkType.Other
+                        )
+                    )
+                    return true
+                }
+
+                // 4) Look for og:video meta
+                val metaOgVideo = Regex("<meta[^>]+property=[\"']og:video[\"'][^>]+content=[\"']([^\"']+\\.(mp4|m4v)[^\"']*)[\"'][^>]*>", RegexOption.IGNORE_CASE)
+                    .find(weTransferPage)?.groups?.get(1)?.value
+                if (metaOgVideo != null) {
+                    android.util.Log.d("An1me_Video", "Found MP4 in og:video meta: $metaOgVideo")
+                    callback.invoke(
+                        createLink(
+                            sourceName = name,
+                            linkName = "$name (WeTransfer og:video)",
+                            url = metaOgVideo,
+                            referer = decodedUrl,
+                            quality = Qualities.Unknown.value,
+                            type = ExtractorLinkType.Other
+                        )
+                    )
+                    return true
+                }
+
+                // 5) Look for <video> or <source> tags
+                val doc = org.jsoup.Jsoup.parse(weTransferPage)
+                val videoSrc = doc.selectFirst("video[src]")?.attr("src")
+                    ?: doc.selectFirst("video source[src]")?.attr("src")
+                    ?: doc.selectFirst("source[src]")?.attr("src")
+                if (!videoSrc.isNullOrEmpty()) {
+                    val resolved = if (videoSrc.startsWith("http")) videoSrc else resolveRelativeUrl(decodedUrl, videoSrc)
+                    android.util.Log.d("An1me_Video", "Found MP4 in video/source tag: $resolved")
+                    callback.invoke(
+                        createLink(
+                            sourceName = name,
+                            linkName = "$name (WeTransfer video tag)",
+                            url = resolved,
+                            referer = decodedUrl,
+                            quality = Qualities.Unknown.value,
+                            type = ExtractorLinkType.Other
+                        )
+                    )
+                    return true
+                }
+
+                // 6) Try an unescaped JSON search for https://...mp4 where quotes might be escaped differently
+                val relaxedJsonRegex = Regex("""(https?:\\?/\\?/[^"'\s>]+?\.(mp4|m4v)(\?[^"'\s>]*)?)""", RegexOption.IGNORE_CASE)
+                val relaxedMatch = relaxedJsonRegex.find(weTransferPage)?.value?.replace("\\/", "/")
+                if (!relaxedMatch.isNullOrEmpty()) {
+                    android.util.Log.d("An1me_Video", "Found MP4 via relaxed regex: $relaxedMatch")
+                    callback.invoke(
+                        createLink(
+                            sourceName = name,
+                            linkName = "$name (WeTransfer relaxed)",
+                            url = relaxedMatch,
+                            referer = decodedUrl,
+                            quality = Qualities.Unknown.value,
+                            type = ExtractorLinkType.Other
+                        )
+                    )
+                    return true
+                }
+
+                android.util.Log.d("An1me_Video", "No MP4 found in WeTransfer page after multiple strategies")
             }
 
             return false
@@ -233,7 +331,8 @@ class An1meProvider : MainAPI() {
                                 linkName = "$name $currentName",
                                 url = safeUrl,
                                 referer = mainUrl,
-                                quality = currentQuality
+                                quality = currentQuality,
+                                type = ExtractorLinkType.M3U8
                             )
                         )
                     }
@@ -252,11 +351,23 @@ class An1meProvider : MainAPI() {
                     linkName = name,
                     url = safeUrl,
                     referer = mainUrl,
-                    quality = Qualities.Unknown.value
+                    quality = Qualities.Unknown.value,
+                    type = ExtractorLinkType.M3U8
                 )
             )
         }
 
         return true
+    }
+
+    // Resolve relative URLs against a base (simple)
+    private fun resolveRelativeUrl(base: String, relative: String): String {
+        return if (relative.startsWith("/")) {
+            val baseRoot = base.substringBefore("//") + "//" + base.substringAfter("//").substringBefore("/")
+            baseRoot + relative
+        } else {
+            val baseDir = base.substringBeforeLast("/")
+            "$baseDir/$relative"
+        }
     }
 }
