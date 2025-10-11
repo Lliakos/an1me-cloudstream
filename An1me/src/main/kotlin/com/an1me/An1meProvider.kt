@@ -133,19 +133,93 @@ class An1meProvider : MainAPI() {
                     android.util.Log.d("An1me_Video", "Direct M3U8 link found")
                     android.util.Log.d("An1me_Video", "Video URL: $videoUrl")
                     
-                    // Add the M3U8 URL directly - let the player handle it
-                    callback.invoke(
-                        ExtractorLink(
-                            name,
-                            name,
-                            videoUrl,
-                            mainUrl,
-                            Qualities.Unknown.value,
-                            true
+                    // Fetch the M3U8 content and manually parse to avoid URI encoding issues
+                    try {
+                        val m3u8Response = app.get(videoUrl).text
+                        android.util.Log.d("An1me_Video", "M3U8 content (first 200 chars): ${m3u8Response.take(200)}")
+                        
+                        // Parse quality variants manually
+                        val lines = m3u8Response.lines()
+                        var currentQuality = Qualities.Unknown.value
+                        var currentName = "Unknown"
+                        
+                        lines.forEachIndexed { index, line ->
+                            if (line.startsWith("#EXT-X-STREAM-INF")) {
+                                // Extract resolution/quality info
+                                val resolutionMatch = """RESOLUTION=\d+x(\d+)""".toRegex().find(line)
+                                val height = resolutionMatch?.groupValues?.get(1)?.toIntOrNull()
+                                
+                                currentQuality = when (height) {
+                                    2160 -> Qualities.P2160.value
+                                    1440 -> Qualities.P1440.value
+                                    1080 -> Qualities.P1080.value
+                                    720 -> Qualities.P720.value
+                                    480 -> Qualities.P480.value
+                                    360 -> Qualities.P360.value
+                                    else -> Qualities.Unknown.value
+                                }
+                                currentName = "${height}p"
+                                
+                                // Next line should be the URL
+                                if (index + 1 < lines.size) {
+                                    val urlLine = lines[index + 1]
+                                    if (!urlLine.startsWith("#")) {
+                                        val fullUrl = if (urlLine.startsWith("http")) {
+                                            urlLine
+                                        } else {
+                                            // Relative URL - construct full path
+                                            val baseUrl = videoUrl.substringBeforeLast("/")
+                                            "$baseUrl/$urlLine"
+                                        }
+                                        
+                                        android.util.Log.d("An1me_Video", "Adding quality link: $currentName - $fullUrl")
+                                        
+                                        callback.invoke(
+                                            ExtractorLink(
+                                                name,
+                                                "$name $currentName",
+                                                fullUrl,
+                                                mainUrl,
+                                                currentQuality,
+                                                true
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // If no variants found, add the master playlist directly
+                        if (lines.none { it.startsWith("#EXT-X-STREAM-INF") }) {
+                            android.util.Log.d("An1me_Video", "No quality variants, adding master playlist")
+                            callback.invoke(
+                                ExtractorLink(
+                                    name,
+                                    name,
+                                    videoUrl,
+                                    mainUrl,
+                                    Qualities.Unknown.value,
+                                    true
+                                )
+                            )
+                        }
+                        
+                        return true
+                    } catch (e: Exception) {
+                        android.util.Log.e("An1me_Video", "Failed to parse M3U8: ${e.message}")
+                        // Last resort fallback
+                        callback.invoke(
+                            ExtractorLink(
+                                name,
+                                name,
+                                videoUrl,
+                                mainUrl,
+                                Qualities.Unknown.value,
+                                true
+                            )
                         )
-                    )
-                    android.util.Log.d("An1me_Video", "Added M3U8 link successfully")
-                    return true
+                        return true
+                    }
                 }
                 
                 // If it's not a direct video URL, it might be an iframe page
