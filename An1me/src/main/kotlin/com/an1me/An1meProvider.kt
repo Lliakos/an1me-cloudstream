@@ -230,22 +230,46 @@ class An1meProvider : MainAPI() {
             android.util.Log.e("An1me_Trailer", "Error extracting trailer: ${e.message}")
         }
 
-        // Get ALL episodes from the episode list
-        val episodes = document.select(".episode-list-display-box a[href*='/watch/']").mapNotNull { ep ->
+        // Get ALL episodes from the swiper and episode list
+        val episodes = mutableListOf<Episode>()
+        
+        // First try the swiper slides (initial visible episodes)
+        document.select("div.swiper-slide a[href*='/watch/'], a[href*='/watch/'][class*='anime']").forEach { ep ->
             val episodeUrl = fixUrl(ep.attr("href"))
-            if (episodeUrl.isEmpty() || episodeUrl.contains("/anime/")) return@mapNotNull null
+            if (episodeUrl.isEmpty() || episodeUrl.contains("/anime/")) return@forEach
+
+            val episodeTitle = ep.attr("title")
+            val episodeNumber = Regex("Episode\\s*(\\d+)|E\\s*(\\d+)", RegexOption.IGNORE_CASE)
+                .find(episodeTitle)?.groupValues?.filterNot { it.isEmpty() }?.lastOrNull()?.toIntOrNull() ?: episodes.size + 1
+
+            episodes.add(newEpisode(episodeUrl) {
+                this.name = "Episode $episodeNumber"
+                this.episode = episodeNumber
+                this.posterUrl = poster
+            })
+        }
+        
+        // Then get from the hidden episode list (all episodes)
+        document.select(".episode-list-display-box a[href*='/watch/']").forEach { ep ->
+            val episodeUrl = fixUrl(ep.attr("href"))
+            if (episodeUrl.isEmpty() || episodeUrl.contains("/anime/")) return@forEach
 
             val episodeNumberText = ep.selectFirst(".episode-list-item-number")?.text()
-            val episodeNumber = episodeNumberText?.toIntOrNull() ?: 1
+            val episodeNumber = episodeNumberText?.toIntOrNull() ?: episodes.size + 1
 
-            val episodeTitle = ep.selectFirst(".episode-list-item-title")?.text() ?: "Episode $episodeNumber"
+            // Check if we already added this episode
+            if (episodes.none { it.episode == episodeNumber }) {
+                val episodeTitle = ep.selectFirst(".episode-list-item-title")?.text() ?: "Episode $episodeNumber"
 
-            newEpisode(episodeUrl) {
-                this.name = episodeTitle
-                this.episode = episodeNumber
-                this.posterUrl = poster // Use anime poster as episode thumbnail
+                episodes.add(newEpisode(episodeUrl) {
+                    this.name = episodeTitle
+                    this.episode = episodeNumber
+                    this.posterUrl = poster
+                })
             }
-        }.sortedBy { it.episode }
+        }
+        
+        episodes.sortBy { it.episode }
 
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = poster
