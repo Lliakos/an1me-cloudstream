@@ -251,9 +251,6 @@ class An1meProvider : MainAPI() {
             this.posterUrl = poster
             this.plot = enhancedDescription
             this.tags = tags
-            if (!trailerUrl.isNullOrEmpty()) {
-                addTrailer(TrailerData(trailerUrl, null))
-            }
             addEpisodes(DubStatus.Subbed, episodes)
         }
     }
