@@ -3,7 +3,6 @@ package com.an1me
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
-import org.json.JSONObject
 import java.util.Base64
 
 @Suppress("DEPRECATION")
@@ -13,25 +12,6 @@ class An1meProvider : MainAPI() {
     override var lang = "gr"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Anime)
-
-    private suspend fun createLink(
-        sourceName: String,
-        linkName: String,
-        url: String,
-        referer: String,
-        quality: Int,
-        type: ExtractorLinkType = ExtractorLinkType.M3U8
-    ): ExtractorLink {
-        return newExtractorLink(
-            source = sourceName,
-            name = linkName,
-            url = url,
-            type = type
-        ) {
-            this.referer = referer
-            this.quality = quality
-        }
-    }
 
     private fun Element.toSearchResult(): AnimeSearchResponse? {
         val link = this.selectFirst("a[href*='/anime/']") ?: return null
@@ -131,140 +111,140 @@ class An1meProvider : MainAPI() {
             val decodedUrl = String(Base64.getDecoder().decode(base64Part))
             android.util.Log.d("An1me_Video", "Decoded URL: $decodedUrl")
 
-            // 🟩 WeTransfer: untouched
-            if (decodedUrl.contains("wetransfer.com", true) || decodedUrl.contains("collect.wetransfer.com", true)) {
-                android.util.Log.d("An1me_Video", "Detected WeTransfer link, attempting extraction...")
+            when {
+                // M3U8 files - parse and handle
+                decodedUrl.contains(".m3u8") -> {
+                    android.util.Log.d("An1me_Video", "M3U8 file detected")
+                    
+                    val m3u8Response = app.get(decodedUrl).text
+                    val lines = m3u8Response.lines()
 
-                val iframeHtml = app.get(iframeSrc).text
-                val cleanedHtml = iframeHtml
-                    .replace("&quot;", "\"")
-                    .replace("&amp;", "&")
-                    .replace("\\u003c", "<")
-                    .replace("\\u003e", ">")
-                    .replace("\\/", "/")
+                    lines.forEachIndexed { index, line ->
+                        if (line.startsWith("#EXT-X-STREAM-INF")) {
+                            val resolutionMatch = """RESOLUTION=\d+x(\d+)""".toRegex().find(line)
+                            val height = resolutionMatch?.groupValues?.get(1)?.toIntOrNull()
+                            val quality = when (height) {
+                                2160 -> Qualities.P2160.value
+                                1440 -> Qualities.P1440.value
+                                1080 -> Qualities.P1080.value
+                                720 -> Qualities.P720.value
+                                480 -> Qualities.P480.value
+                                360 -> Qualities.P360.value
+                                else -> Qualities.Unknown.value
+                            }
+                            val qualityName = "${height}p"
 
-                val match = Regex("""const\s+params\s*=\s*(\{.*?"sources".*?\});""", RegexOption.DOT_MATCHES_ALL)
-                    .find(cleanedHtml)
-                    ?.groupValues?.get(1)
-                    ?: return false.also { android.util.Log.d("An1me_Video", "No JSON params found in WeTransfer iframe") }
+                            if (index + 1 < lines.size) {
+                                val urlLine = lines[index + 1]
+                                if (!urlLine.startsWith("#")) {
+                                    val fullUrl = if (urlLine.startsWith("http")) {
+                                        urlLine
+                                    } else {
+                                        val baseUrl = decodedUrl.substringBeforeLast("/")
+                                        "$baseUrl/$urlLine"
+                                    }
 
-                val json = JSONObject(match)
-                val sources = json.optJSONArray("sources")
-                if (sources != null && sources.length() > 0) {
-                    val videoUrl = sources.getJSONObject(0).getString("url")
-                        .replace("\\/", "/")
-                        .replace("\\u0026", "&")
+                                    val safeUrl = fullUrl
+                                        .replace(" ", "%20")
+                                        .replace("[", "%5B")
+                                        .replace("]", "%5D")
 
-                    android.util.Log.d("An1me_Video", "Found WeTransfer video URL: $videoUrl")
-
-                    callback(
-                        createLink(
-                            sourceName = name,
-                            linkName = "$name (WeTransfer)",
-                            url = videoUrl,
-                            referer = iframeSrc,
-                            quality = if (videoUrl.contains("1080")) Qualities.P1080.value else Qualities.Unknown.value,
-                            type = ExtractorLinkType.VIDEO
-                        )
-                    )
-                    return true
-                }
-            }
-
-            // 🟨 Fix Google Photos (stop infinite reloads)
-            if (decodedUrl.contains("photos.google.com", true)) {
-                android.util.Log.d("An1me_Video", "Detected Google Photos source — trying to extract direct video link")
-
-                val photoHtml = app.get(decodedUrl, referer = iframeSrc).text
-                val match = Regex("""https:\/\/(lh3|video)\.googleusercontent\.com\/[^\"]+""").find(photoHtml)
-                if (match != null) {
-                    var videoUrl = match.value
-                        .replace("\\u003d", "=")
-                        .replace("\\u0026", "&")
-                        .replace("\\/", "/")
-
-                    // Force quality hint if missing
-                    if (!videoUrl.contains("=m")) {
-                        videoUrl += "=m22"
+                                    callback.invoke(
+                                        ExtractorLink(
+                                            name,
+                                            "$name $qualityName",
+                                            safeUrl,
+                                            mainUrl,
+                                            quality,
+                                            true
+                                        )
+                                    )
+                                }
+                            }
+                        }
                     }
 
-                    android.util.Log.d("An1me_Video", "Found Google Photos video URL: $videoUrl")
-
-                    callback(
-                        createLink(
-                            sourceName = name,
-                            linkName = "$name (Google Photos)",
-                            url = videoUrl,
-                            referer = decodedUrl,
-                            quality = Qualities.P1080.value,
-                            type = ExtractorLinkType.VIDEO
-                        )
-                    )
-                    return true
-                } else {
-                    android.util.Log.d("An1me_Video", "No googleusercontent link found in Photos page")
-                }
-            }
-
-            // 🟦 Improved M3U8 with quality under "tracks"
-            if (decodedUrl.contains(".m3u8", true)) {
-                android.util.Log.d("An1me_Video", "Detected M3U8 source — trying to parse qualities")
-
-                val response = app.get(decodedUrl)
-                val text = response.text
-
-                val regex = Regex("""RESOLUTION=(\d+x\d+)[\s\S]*?(https?:\/\/[^\s]+\.m3u8)""")
-                val tracks = regex.findAll(text).mapNotNull { match ->
-                    val res = match.groupValues[1]
-                    val url = match.groupValues[2]
-                    val height = res.substringAfter("x").toIntOrNull() ?: 0
-                    Pair(height, url)
-                }.sortedByDescending { it.first }
-
-                if (tracks.isNotEmpty()) {
-                    tracks.forEach { (height, url) ->
-                        val quality = when {
-                            height >= 1080 -> Qualities.P1080.value
-                            height >= 720 -> Qualities.P720.value
-                            height >= 480 -> Qualities.P480.value
-                            else -> Qualities.Unknown.value
-                        }
-
-                        android.util.Log.d("An1me_Video", "Found M3U8 track: ${height}p → $url")
-
-                        callback(
-                            createLink(
-                                sourceName = name,
-                                linkName = "$name (${height}p M3U8)",
-                                url = url,
-                                referer = data,
-                                quality = quality,
-                                type = ExtractorLinkType.M3U8
+                    // Fallback if no variants found
+                    if (lines.none { it.startsWith("#EXT-X-STREAM-INF") }) {
+                        val safeUrl = decodedUrl
+                            .replace(" ", "%20")
+                            .replace("[", "%5B")
+                            .replace("]", "%5D")
+                        
+                        callback.invoke(
+                            ExtractorLink(
+                                name,
+                                name,
+                                safeUrl,
+                                mainUrl,
+                                Qualities.Unknown.value,
+                                true
                             )
                         )
                     }
                     return true
                 }
 
-                // fallback if no tracks detected
-                callback(
-                    createLink(
-                        sourceName = name,
-                        linkName = "$name (M3U8)",
-                        url = decodedUrl,
-                        referer = data,
-                        quality = Qualities.Unknown.value,
-                        type = ExtractorLinkType.M3U8
-                    )
-                )
-                return true
+                // Google Photos links
+                decodedUrl.contains("photos.google.com") || 
+                decodedUrl.contains("googleusercontent.com") -> {
+                    android.util.Log.d("An1me_Video", "Google Photos link detected")
+                    
+                    try {
+                        val photosDoc = app.get(decodedUrl).document
+                        
+                        val videoUrl = photosDoc.selectFirst("video source")?.attr("src")
+                            ?: photosDoc.selectFirst("meta[property='og:video']")?.attr("content")
+                            ?: photosDoc.selectFirst("meta[property='og:video:secure_url']")?.attr("content")
+                        
+                        if (!videoUrl.isNullOrEmpty()) {
+                            android.util.Log.d("An1me_Video", "Found video URL in Google Photos: $videoUrl")
+                            callback.invoke(
+                                ExtractorLink(
+                                    name,
+                                    "$name Google",
+                                    videoUrl,
+                                    decodedUrl,
+                                    Qualities.Unknown.value,
+                                    false
+                                )
+                            )
+                            return true
+                        }
+                        
+                        android.util.Log.d("An1me_Video", "No direct video found, trying loadExtractor")
+                        return loadExtractor(decodedUrl, data, subtitleCallback, callback)
+                        
+                    } catch (e: Exception) {
+                        android.util.Log.e("An1me_Video", "Google Photos extraction failed: ${e.message}")
+                        return loadExtractor(decodedUrl, data, subtitleCallback, callback)
+                    }
+                }
+
+                // WeTransfer links
+                decodedUrl.contains("wetransfer.com") -> {
+                    android.util.Log.d("An1me_Video", "WeTransfer link detected")
+                    return try {
+                        loadExtractor(decodedUrl, data, subtitleCallback, callback)
+                    } catch (e: Exception) {
+                        android.util.Log.e("An1me_Video", "WeTransfer failed: ${e.message}")
+                        false
+                    }
+                }
+
+                // Any other HTTP URL
+                decodedUrl.startsWith("http") -> {
+                    android.util.Log.d("An1me_Video", "Unknown HTTP URL, trying loadExtractor")
+                    return loadExtractor(decodedUrl, data, subtitleCallback, callback)
+                }
+
+                else -> {
+                    android.util.Log.d("An1me_Video", "Unknown URL format")
+                    return false
+                }
             }
-
-            android.util.Log.d("An1me_Video", "No valid video link found.")
-            return false
-
         } catch (e: Exception) {
-            android.util.Log.e("An1me_Video", "Error loading links: ${e.message}", e)
+            android.util.Log.e("An1me_Video", "Error: ${e.message}", e)
             return false
         }
     }
