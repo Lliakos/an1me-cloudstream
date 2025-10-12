@@ -102,25 +102,13 @@ class An1meProvider : MainAPI() {
         val document = app.get(mainUrl).document
         val homePages = mutableListOf<HomePageList>()
 
-        // Spotlight Section
-        try {
-            val spotlightItems = document.select(".swiper-spotlight .swiper-slide").mapNotNull { 
-                it.toSpotlightResult() 
-            }
-            if (spotlightItems.isNotEmpty()) {
-                homePages.add(HomePageList("Spotlight", spotlightItems))
-            }
-        } catch (e: Exception) {
-            android.util.Log.e("An1me_MainPage", "Error parsing spotlight: ${e.message}")
-        }
-
         // Trending Section
         try {
             val trendingItems = document.select(".swiper-trending .swiper-slide").mapNotNull { 
                 it.toTrendingResult() 
             }
             if (trendingItems.isNotEmpty()) {
-                homePages.add(HomePageList("Τάσεις", trendingItems))
+                homePages.add(HomePageList("Τάσεις", trendingItems, isHorizontalImages = true))
             }
         } catch (e: Exception) {
             android.util.Log.e("An1me_MainPage", "Error parsing trending: ${e.message}")
@@ -230,39 +218,41 @@ class An1meProvider : MainAPI() {
             android.util.Log.e("An1me_Trailer", "Error extracting trailer: ${e.message}")
         }
 
-        // Get ALL episodes from the swiper and episode list
+        // Get ALL episodes - the list has class "hidden" but contains all episodes
         val episodes = mutableListOf<Episode>()
         
-        // First try the swiper slides (initial visible episodes)
-        document.select("div.swiper-slide a[href*='/watch/'], a[href*='/watch/'][class*='anime']").forEach { ep ->
-            val episodeUrl = fixUrl(ep.attr("href"))
-            if (episodeUrl.isEmpty() || episodeUrl.contains("/anime/")) return@forEach
+        // Get episodes from the episode list box (even though it has "hidden" class, the HTML is there)
+        val episodeListBox = document.selectFirst("div.episode-list-display-box")
+        if (episodeListBox != null) {
+            episodeListBox.select("a.episode-list-item[href*='/watch/']").forEach { ep ->
+                val episodeUrl = fixUrl(ep.attr("href"))
+                if (episodeUrl.isEmpty() || episodeUrl.contains("/anime/")) return@forEach
 
-            val episodeTitle = ep.attr("title")
-            val episodeNumber = Regex("Episode\\s*(\\d+)|E\\s*(\\d+)", RegexOption.IGNORE_CASE)
-                .find(episodeTitle)?.groupValues?.filterNot { it.isEmpty() }?.lastOrNull()?.toIntOrNull() ?: episodes.size + 1
+                val episodeNumberText = ep.selectFirst(".episode-list-item-number")?.text()
+                val episodeNumber = episodeNumberText?.trim()?.toIntOrNull() ?: return@forEach
 
-            episodes.add(newEpisode(episodeUrl) {
-                this.name = "Episode $episodeNumber"
-                this.episode = episodeNumber
-                this.posterUrl = poster
-            })
-        }
-        
-        // Then get from the hidden episode list (all episodes)
-        document.select(".episode-list-display-box a[href*='/watch/']").forEach { ep ->
-            val episodeUrl = fixUrl(ep.attr("href"))
-            if (episodeUrl.isEmpty() || episodeUrl.contains("/anime/")) return@forEach
-
-            val episodeNumberText = ep.selectFirst(".episode-list-item-number")?.text()
-            val episodeNumber = episodeNumberText?.toIntOrNull() ?: episodes.size + 1
-
-            // Check if we already added this episode
-            if (episodes.none { it.episode == episodeNumber }) {
-                val episodeTitle = ep.selectFirst(".episode-list-item-title")?.text() ?: "Episode $episodeNumber"
+                val episodeTitle = ep.selectFirst(".episode-list-item-title")?.text()?.trim() ?: "Episode $episodeNumber"
 
                 episodes.add(newEpisode(episodeUrl) {
                     this.name = episodeTitle
+                    this.episode = episodeNumber
+                    this.posterUrl = poster
+                })
+            }
+        }
+        
+        // Fallback: if episode list is empty, try swiper slides
+        if (episodes.isEmpty()) {
+            document.select("div.swiper-slide a[href*='/watch/']").forEach { ep ->
+                val episodeUrl = fixUrl(ep.attr("href"))
+                if (episodeUrl.isEmpty() || episodeUrl.contains("/anime/")) return@forEach
+
+                val episodeTitle = ep.attr("title")
+                val episodeNumber = Regex("Episode\\s*(\\d+)|E\\s*(\\d+)", RegexOption.IGNORE_CASE)
+                    .find(episodeTitle)?.groupValues?.filterNot { it.isEmpty() }?.lastOrNull()?.toIntOrNull() ?: episodes.size + 1
+
+                episodes.add(newEpisode(episodeUrl) {
+                    this.name = "Episode $episodeNumber"
                     this.episode = episodeNumber
                     this.posterUrl = poster
                 })
