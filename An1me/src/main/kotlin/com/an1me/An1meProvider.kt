@@ -185,41 +185,53 @@ class An1meProvider : MainAPI() {
                     return true
                 }
 
-                // Google Photos links
-                decodedUrl.contains("photos.google.com") || 
-                decodedUrl.contains("googleusercontent.com") -> {
-                    android.util.Log.d("An1me_Video", "Google Photos link detected")
-                    
-                    try {
-                        val photosDoc = app.get(decodedUrl).document
-                        
-                        val videoUrl = photosDoc.selectFirst("video source")?.attr("src")
-                            ?: photosDoc.selectFirst("meta[property='og:video']")?.attr("content")
-                            ?: photosDoc.selectFirst("meta[property='og:video:secure_url']")?.attr("content")
-                        
-                        if (!videoUrl.isNullOrEmpty()) {
-                            android.util.Log.d("An1me_Video", "Found video URL in Google Photos: $videoUrl")
-                            callback.invoke(
-                                ExtractorLink(
-                                    name,
-                                    "$name Google",
-                                    videoUrl,
-                                    decodedUrl,
-                                    Qualities.Unknown.value,
-                                    false
-                                )
-                            )
-                            return true
-                        }
-                        
-                        android.util.Log.d("An1me_Video", "No direct video found, trying loadExtractor")
-                        return loadExtractor(decodedUrl, data, subtitleCallback, callback)
-                        
-                    } catch (e: Exception) {
-                        android.util.Log.e("An1me_Video", "Google Photos extraction failed: ${e.message}")
-                        return loadExtractor(decodedUrl, data, subtitleCallback, callback)
-                    }
+// 🟨 Handle Google Photos
+if (decodedUrl.contains("photos.google.com", true)) {
+    try {
+        android.util.Log.d("An1me_Video", "Detected Google Photos source — trying to extract direct video link")
+
+        val photoHtml = app.get(decodedUrl, referer = iframeSrc).text
+        
+        // Try to find video URLs (googleusercontent.com with =m18, =m22, =m37 for videos)
+        val videoRegex = Regex("""(https:\/\/[^"'\s]+googleusercontent\.com[^"'\s]+)""")
+        val matches = videoRegex.findAll(photoHtml)
+        
+        for (match in matches) {
+            var rawUrl = match.value
+                .replace("\\u003d", "=")
+                .replace("\\u0026", "&")
+                .replace("\\/", "/")
+                .replace("\\", "")
+            
+            // Google Photos videos need =m18 or =m37 parameter for video playback
+            if (!rawUrl.contains("=m18") && !rawUrl.contains("=m22") && !rawUrl.contains("=m37")) {
+                rawUrl = if (rawUrl.contains("?")) {
+                    "$rawUrl&m=18"
+                } else {
+                    "$rawUrl=m18"
                 }
+            }
+            
+            android.util.Log.d("An1me_Video", "Found Google Photos video URL: $rawUrl")
+
+            callback(
+                createLink(
+                    sourceName = name,
+                    linkName = "$name (Google Photos)",
+                    url = rawUrl,
+                    referer = decodedUrl,
+                    quality = Qualities.Unknown.value,
+                    type = ExtractorLinkType.VIDEO
+                )
+            )
+            return true
+        }
+        
+        android.util.Log.d("An1me_Video", "No googleusercontent link found in Photos page")
+    } catch (e: Exception) {
+        android.util.Log.e("An1me_Video", "Error extracting Google Photos video: ${e.message}", e)
+    }
+}
 
                 // WeTransfer links
                 decodedUrl.contains("wetransfer.com") -> {
