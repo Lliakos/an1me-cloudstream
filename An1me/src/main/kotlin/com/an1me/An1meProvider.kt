@@ -65,7 +65,6 @@ class An1meProvider : MainAPI() {
 
         return newAnimeSearchResponse(title, href, TvType.Anime) {
             this.posterUrl = fixUrlNull(bannerUrl)
-            this.backgroundPosterUrl = fixUrlNull(bannerUrl)
         }
     }
 
@@ -250,10 +249,11 @@ class An1meProvider : MainAPI() {
 
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = poster
-            this.backgroundPosterUrl = fixUrlNull(bannerUrl)
             this.plot = enhancedDescription
             this.tags = tags
-            trailerUrl?.let { addTrailer(it) }
+            if (!trailerUrl.isNullOrEmpty()) {
+                addTrailer(TrailerData(trailerUrl, null))
+            }
             addEpisodes(DubStatus.Subbed, episodes)
         }
     }
