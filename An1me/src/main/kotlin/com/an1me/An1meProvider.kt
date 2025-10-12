@@ -33,15 +33,23 @@ class An1meProvider : MainAPI() {
         }
     }
 
+    // Always prefer English title. If not available, fallback to meta og:title or plain text.
+    private fun Element.extractEnglishTitle(): String? {
+        return this.selectFirst("span[data-en-title]")?.text()
+            ?: this.selectFirst("span[data-title-en]")?.text()
+            ?: this.selectFirst("meta[property=og:title]")?.attr("content")
+            ?: this.selectFirst("a")?.attr("title")
+    }
+
     private fun Element.toSearchResult(): AnimeSearchResponse? {
         val link = this.selectFirst("a[href*='/anime/']") ?: return null
         val href = fixUrl(link.attr("href"))
         if (href.contains("/watch/")) return null
 
+        // Prefer English title only
         val title = this.selectFirst("span[data-en-title]")?.text()
-            ?: this.selectFirst("span[data-nt-title]")?.text()
-            ?: link.attr("title")
             ?: this.selectFirst("img")?.attr("alt")
+            ?: link.attr("title")
             ?: return null
 
         val posterUrl = fixUrlNull(this.selectFirst("img")?.attr("src"))
@@ -52,35 +60,39 @@ class An1meProvider : MainAPI() {
     }
 
     /**
-     * Spotlight result: returns an item that prefers banner images (stretched) but falls back to poster.
-     * We'll use this list to populate the built-in top slider (first HomePageList).
+     * Spotlight result: prefer title-card (poster) stretched, fallback to banner if needed.
+     * We changed this to ensure the spotlight has an image.
      */
     private fun Element.toSpotlightResult(): AnimeSearchResponse? {
         val link = this.selectFirst("a[href*='/anime/']") ?: return null
         val href = fixUrl(link.attr("href"))
 
-        val enTitle = this.selectFirst("span[data-en-title]")?.text()
-        val ntTitle = this.selectFirst("span[data-nt-title]")?.text()
-        val title = enTitle ?: ntTitle ?: link.attr("title") ?: this.selectFirst("img")?.attr("alt") ?: return null
+        // Prefer English title only
+        val title = this.selectFirst("span[data-en-title]")?.text()
+            ?: this.selectFirst("img")?.attr("alt")
+            ?: link.attr("title")
+            ?: return null
 
-        // Prefer banner image (wide) from Anilist if present; else use poster
-        val bannerUrl = this.selectFirst("img[src*='anilist.co/file/anilistcdn/media/anime/banner']")?.attr("src")
-            ?: this.selectFirst("img")?.attr("src")
+        // Prefer the title-card (poster) for spotlight so slider has images.
+        val posterImg = this.selectFirst("img")?.attr("src")
+        val bannerImg = this.selectFirst("img[src*='anilist.co/file/anilistcdn/media/anime/banner']")?.attr("src")
+
+        // set posterUrl to posterImg (title card). If missing, use banner.
+        val imageToUse = posterImg ?: bannerImg
 
         return newAnimeSearchResponse(title, href, TvType.Anime) {
-            // For spotlight we want a stretched/banner-like image; set posterUrl to banner when available
-            this.posterUrl = fixUrlNull(bannerUrl)
+            this.posterUrl = fixUrlNull(imageToUse)
         }
     }
 
     private fun Element.toTrendingResult(): AnimeSearchResponse? {
-        // Keep same basic structure as search result, but used for trending cards
         val link = this.selectFirst("a[href*='/anime/']") ?: return null
         val href = fixUrl(link.attr("href"))
 
-        val enTitle = this.selectFirst("span[data-en-title]")?.text()
-        val ntTitle = this.selectFirst("span[data-nt-title]")?.text()
-        val title = enTitle ?: ntTitle ?: link.attr("title") ?: this.selectFirst("img")?.attr("alt") ?: return null
+        val title = this.selectFirst("span[data-en-title]")?.text()
+            ?: this.selectFirst("img")?.attr("alt")
+            ?: link.attr("title")
+            ?: return null
 
         val posterUrl = fixUrlNull(this.selectFirst("img")?.attr("src"))
 
@@ -93,9 +105,10 @@ class An1meProvider : MainAPI() {
         val link = this.selectFirst("a[href*='/anime/']") ?: return null
         val href = fixUrl(link.attr("href"))
 
-        val enTitle = this.selectFirst("span[data-en-title]")?.text()
-        val ntTitle = this.selectFirst("span[data-nt-title]")?.text()
-        val title = enTitle ?: ntTitle ?: link.attr("title") ?: return null
+        val title = this.selectFirst("span[data-en-title]")?.text()
+            ?: this.selectFirst("img")?.attr("alt")
+            ?: link.attr("title")
+            ?: return null
 
         val posterUrl = fixUrlNull(this.selectFirst("img")?.attr("src"))
 
@@ -108,11 +121,8 @@ class An1meProvider : MainAPI() {
         val document = app.get(mainUrl).document
         val homePages = mutableListOf<HomePageList>()
 
-        // ---------------------------
-        // SPOTLIGHT -> populate top slider (first HomePageList)
-        // ---------------------------
+        // Spotlight -> top slider: collect spotlight elements robustly
         try {
-            // Try several common spotlight selectors to be robust
             val spotlightSelectors = listOf(
                 ".spotlight .swiper-slide",
                 ".home-spotlight .swiper-slide",
@@ -123,35 +133,30 @@ class An1meProvider : MainAPI() {
 
             val spotlightElements = spotlightSelectors
                 .flatMap { sel -> document.select(sel).toList() }
-                .distinct() // avoid duplicates
+                .distinct()
                 .mapNotNull { it.toSpotlightResult() }
 
             if (spotlightElements.isNotEmpty()) {
-                // Insert spotlight as first HomePageList; this list will be used by Cloudstream's top slider UI
+                // Put spotlight as first list so Cloudstream top slider uses it.
                 homePages.add(HomePageList("Featured", spotlightElements, isHorizontalImages = true))
             }
         } catch (e: Exception) {
             android.util.Log.e("An1me_MainPage", "Error parsing spotlight: ${e.message}")
         }
 
-        // ---------------------------
-        // Trending Section (normal sized title cards)
-        // ---------------------------
+        // Trending: normal sized title cards (ensure not horizontal)
         try {
-            val trendingItems = document.select(".swiper-trending .swiper-slide, .trending .swiper-slide").mapNotNull {
-                it.toTrendingResult()
-            }
+            val trendingItems = document.select(".swiper-trending .swiper-slide, .trending .swiper-slide")
+                .mapNotNull { it.toTrendingResult() }
+
             if (trendingItems.isNotEmpty()) {
-                // Do NOT use isHorizontalImages here — trending should be normal title cards
                 homePages.add(HomePageList("Τάσεις", trendingItems))
             }
         } catch (e: Exception) {
             android.util.Log.e("An1me_MainPage", "Error parsing trending: ${e.message}")
         }
 
-        // ---------------------------
-        // Latest Episodes Section
-        // ---------------------------
+        // Latest Episodes
         try {
             val latestEpisodesSection = document.selectFirst("section:has(h2:contains(Καινούργια Επεισόδια))")
             val latestEpisodeItems = latestEpisodesSection?.select(".kira-grid-listing > div")?.mapNotNull {
@@ -164,9 +169,7 @@ class An1meProvider : MainAPI() {
             android.util.Log.e("An1me_MainPage", "Error parsing latest episodes: ${e.message}")
         }
 
-        // ---------------------------
-        // Latest Anime Section (general)
-        // ---------------------------
+        // Latest Anime (general)
         try {
             val items = document.select("li").mapNotNull { it.toSearchResult() }
             if (items.isNotEmpty()) {
@@ -187,9 +190,11 @@ class An1meProvider : MainAPI() {
             val link = item.selectFirst("a[href*='/anime/']") ?: return@mapNotNull null
             val href = fixUrl(link.attr("href"))
 
-            val enTitle = item.selectFirst("span[data-en-title]")?.text()
-            val ntTitle = item.selectFirst("span[data-nt-title]")?.text()
-            val title = enTitle ?: ntTitle ?: return@mapNotNull null
+            // Always prefer English title
+            val title = item.selectFirst("span[data-en-title]")?.text()
+                ?: item.selectFirst("img")?.attr("alt")
+                ?: link.attr("title")
+                ?: return@mapNotNull null
 
             val posterUrl = fixUrlNull(item.selectFirst("img")?.attr("src"))
 
@@ -202,19 +207,25 @@ class An1meProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
 
-        val title = document.selectFirst("h1.entry-title, h1")?.text() ?: "Unknown"
-        val poster = fixUrlNull(document.selectFirst("img")?.attr("src"))
-        val description = document.selectFirst("div[data-synopsis]")?.text()
+        // Prefer the English title from page or metadata; fallback to plain header text
+        val title = document.selectFirst("span[data-en-title]")?.text()
+            ?: document.selectFirst("h1.entry-title")?.text()
+            ?: document.selectFirst("meta[property=og:title]")?.attr("content")
+            ?: "Unknown"
 
-        // Get background/banner from MAL/Anilist if available, otherwise use poster
+        // poster (title card)
+        val poster = fixUrlNull(document.selectFirst("img")?.attr("src"))
+        // banner (wide) - prefer Anilist banner if present
         val bannerUrl = document.selectFirst("img[src*='anilist.co/file/anilistcdn/media/anime/banner']")?.attr("src")
             ?: poster
+
+        val description = document.selectFirst("div[data-synopsis]")?.text()
 
         val tags = document.select("li:has(span:containsOwn(Είδος:)) a[href*='/genre/']").map {
             it.text().trim()
         }
 
-        // Extract metadata
+        // metadata extraction (unchanged)
         val malScore = document.selectFirst("li:has(span:contains(MAL Βαθμολογια:))")
             ?.text()?.substringAfter(":")?.trim()
         val status = document.selectFirst("li:has(span:contains(Κατάσταση:)) a")?.text()
@@ -228,7 +239,6 @@ class An1meProvider : MainAPI() {
             ?.text()?.substringAfter(":")?.trim()
         val studio = document.selectFirst("li:has(span:contains(Στούντιο:)) a")?.text()
 
-        // Build enhanced description
         val enhancedDescription = buildString {
             description?.let { append(it).append("\n\n") }
             append("━━━━━━━━━━━━━━━━\n")
@@ -241,7 +251,7 @@ class An1meProvider : MainAPI() {
             studio?.let { append("🎨 Studio: $it") }
         }
 
-        // Extract trailer
+        // trailer extraction unchanged
         var trailerUrl: String? = null
         try {
             val trailerButton = document.selectFirst("a:contains(Watch Trailer), a:has(span:contains(Watch Trailer))")
@@ -258,73 +268,98 @@ class An1meProvider : MainAPI() {
         }
 
         // ---------------------------
-        // Episodes: collect ALL episodes from all ".episode-list-display-box" elements
-        // This fixes the 'last 30 episodes only' issue by reading every box, including hidden ones.
+        // Episodes: collect ALL anchors matching /watch/ across the entire document.
+        // This is the key fix — it avoids depending on a single "last 30" container.
+        // We dedupe by URL and then sort properly by episode number (ASC).
         // ---------------------------
         val episodes = mutableListOf<Episode>()
+        try {
+            val anchors = document.select("a[href*='/watch/']")
+                .mapNotNull { el ->
+                    val href = fixUrl(el.attr("href"))
+                    if (href.isNullOrEmpty() || href.contains("/anime/")) return@mapNotNull null
+                    Pair(el, href)
+                }
+                // dedupe by href while preserving order of first occurrence
+                .distinctBy { it.second }
 
-        // Find all boxes that may include episode anchors (visible and hidden)
-        val episodeBoxes = document.select("div.episode-list-display-box")
-        episodeBoxes.forEach { box ->
-            box.select("a.episode-list-item[href*='/watch/']").forEach { ep ->
+            anchors.forEach { (el, episodeUrl) ->
                 try {
-                    val episodeUrl = fixUrl(ep.attr("href"))
-                    if (episodeUrl.isEmpty() || episodeUrl.contains("/anime/")) return@forEach
+                    // episode number: prefer element .episode-list-item-number, else try data attribute, else regex on text or url
+                    val numText = el.selectFirst(".episode-list-item-number")?.text()
+                        ?: el.attr("data-episode-number").takeIf { it.isNotBlank() }
+                        ?: el.selectFirst(".episode-list-item")?.attr("data-episode-search-query")
+                        ?: el.text()
 
-                    // Episode number - prefer dedicated element, fallback to regex on title
-                    val episodeNumberText = ep.selectFirst(".episode-list-item-number")?.text()
-                    val episodeNumber = episodeNumberText?.trim()?.toIntOrNull()
-                        ?: Regex("Episode\\s*(\\d+)|E\\s*(\\d+)", RegexOption.IGNORE_CASE)
-                            .find(ep.text())?.groupValues?.filterNot { it.isEmpty() }?.lastOrNull()?.toIntOrNull()
+                    val episodeNumber = Regex("Episode\\s*(\\d+)|E\\s*(\\d+)|(\\d+)$")
+                        .find(numText ?: "")?.groupValues?.filterNot { it.isEmpty() }?.lastOrNull()?.toIntOrNull()
+                        // fallback: try to extract digits from url (/episode-123/ or -episode-123)
+                        ?: Regex("episode-(\\d+)|episode_(\\d+)|-(\\d+)/?$").find(episodeUrl)?.groupValues?.filterNot { it.isEmpty() }?.lastOrNull()?.toIntOrNull()
                         ?: (episodes.size + 1)
 
-                    val episodeTitle = ep.selectFirst(".episode-list-item-title")?.text()?.trim()
+                    val episodeTitle = el.selectFirst(".episode-list-item-title")?.text()?.trim()
+                        ?: el.attr("title").takeIf { it.isNotBlank() }
                         ?: "Episode $episodeNumber"
 
-                    // Use the anime card/poster for episode thumbnails (title card image)
                     episodes.add(newEpisode(episodeUrl) {
                         this.name = episodeTitle
                         this.episode = episodeNumber
-                        this.posterUrl = poster // poster is the title-card image
-                    })
-                } catch (ex: Exception) {
-                    // don't let one bad item fail everything
-                    android.util.Log.e("An1me_EpisodeParse", "Error parsing an episode entry: ${ex.message}")
-                }
-            }
-        }
-
-        // Fallback: if still empty, try the swiper slides (older fallback)
-        if (episodes.isEmpty()) {
-            document.select("div.swiper-slide a[href*='/watch/']").forEach { ep ->
-                try {
-                    val episodeUrl = fixUrl(ep.attr("href"))
-                    if (episodeUrl.isEmpty() || episodeUrl.contains("/anime/")) return@forEach
-
-                    val episodeTitle = ep.attr("title")
-                    val episodeNumber = Regex("Episode\\s*(\\d+)|E\\s*(\\d+)", RegexOption.IGNORE_CASE)
-                        .find(episodeTitle)?.groupValues?.filterNot { it.isEmpty() }?.lastOrNull()?.toIntOrNull()
-                        ?: (episodes.size + 1)
-
-                    episodes.add(newEpisode(episodeUrl) {
-                        this.name = "Episode $episodeNumber"
-                        this.episode = episodeNumber
+                        // Use the anime's title card (poster) as the episode thumbnail
                         this.posterUrl = poster
                     })
                 } catch (ex: Exception) {
-                    android.util.Log.e("An1me_EpisodeParse", "Error parsing swiper episode: ${ex.message}")
+                    android.util.Log.e("An1me_EpisodeParse", "Error parsing an episode anchor: ${ex.message}")
                 }
             }
+
+            // Final sort and dedupe again by episode number
+            val uniqueByNumber = episodes
+                .distinctBy { it.episode } // keep first occurrence of each episode number
+                .sortedBy { it.episode }
+
+            episodes.clear()
+            episodes.addAll(uniqueByNumber)
+        } catch (e: Exception) {
+            android.util.Log.e("An1me_EpisodeParse", "Error collecting all episode anchors: ${e.message}")
         }
 
+        // Fallback: if none found, try older selectors (keeps robust)
+        if (episodes.isEmpty()) {
+            try {
+                document.select("div.episode-list-display-box a.episode-list-item[href*='/watch/']").forEach { ep ->
+                    try {
+                        val episodeUrl = fixUrl(ep.attr("href"))
+                        if (episodeUrl.isEmpty() || episodeUrl.contains("/anime/")) return@forEach
+
+                        val episodeNumberText = ep.selectFirst(".episode-list-item-number")?.text()
+                        val episodeNumber = episodeNumberText?.trim()?.toIntOrNull() ?: (episodes.size + 1)
+
+                        val episodeTitle = ep.selectFirst(".episode-list-item-title")?.text()?.trim() ?: "Episode $episodeNumber"
+
+                        episodes.add(newEpisode(episodeUrl) {
+                            this.name = episodeTitle
+                            this.episode = episodeNumber
+                            this.posterUrl = poster
+                        })
+                    } catch (ex: Exception) {
+                        android.util.Log.e("An1me_EpisodeParse", "Fallback parse failed: ${ex.message}")
+                    }
+                }
+                episodes.sortBy { it.episode }
+            } catch (_: Exception) { /* ignore */ }
+        }
+
+        // ensure episodes sorted ascending
         episodes.sortBy { it.episode }
 
+        // ---------------------------
+        // Return load response with banner as main image for all anime (One Piece banner etc)
+        // ---------------------------
         return newAnimeLoadResponse(title, url, TvType.Anime) {
-            // Use bannerUrl as the main top image when available, otherwise the poster
+            // Use banner when available; this makes the top of details pages full-banner for everything
             this.posterUrl = fixUrlNull(bannerUrl)
             this.plot = enhancedDescription
             this.tags = tags
-            // Add all episodes (poster for each episode set above)
             addEpisodes(DubStatus.Subbed, episodes)
         }
     }
@@ -351,7 +386,7 @@ class An1meProvider : MainAPI() {
             android.util.Log.d("An1me_Video", "Decoded URL: $decodedUrl")
 
             // -------------------------------------------------------
-            // WeTransfer (special handling) — unchanged behavior, robust extraction
+            // WeTransfer (special handling)
             // -------------------------------------------------------
             if (decodedUrl.contains("wetransfer.com", true) || decodedUrl.contains("collect.wetransfer.com", true)) {
                 android.util.Log.d("An1me_Video", "Detected WeTransfer link, attempting extraction...")
@@ -406,25 +441,21 @@ class An1meProvider : MainAPI() {
             }
 
             // -------------------------------------------------------
-            // Google Photos: extract multiple quality variants (1080/720/480)
-            // ensures Cloudstream gets distinct links and does not loop
+            // Google Photos: emit multiple quality variants to avoid reload loops
             // -------------------------------------------------------
             if (decodedUrl.contains("photos.google.com", true)) {
                 try {
-                    android.util.Log.d("An1me_Video", "Detected Google Photos source — extracting all quality variants")
+                    android.util.Log.d("An1me_Video", "Detected Google Photos source — extracting quality variants")
 
                     val photoHtml = app.get(decodedUrl, referer = iframeSrc).text
 
-                    // collect googleusercontent matches
                     val videoRegex = Regex("""(https:\/\/[^"'\s]+googleusercontent\.com[^"'\s]+)""")
                     val matches = videoRegex.findAll(photoHtml).toList()
-
                     if (matches.isEmpty()) {
                         android.util.Log.d("An1me_Video", "No googleusercontent links found")
                         return false
                     }
 
-                    // base URL: strip any existing =m param or query
                     val raw = matches.first().value
                         .replace("\\u003d", "=")
                         .replace("\\u0026", "&")
@@ -432,18 +463,15 @@ class An1meProvider : MainAPI() {
                         .trim()
 
                     val baseUrl = raw.substringBefore("=m").substringBefore("?")
-
                     android.util.Log.d("An1me_Video", "Base Google Photos URL: $baseUrl")
 
-                    // Build preferred variants (ordered: 1080, 720, 480, 360)
                     val variants = listOf(
-                        Pair("1080p", "=m22") to Qualities.P1080.value, // m22 often maps to 1080 (varies by Google)
+                        Pair("1080p", "=m22") to Qualities.P1080.value,
                         Pair("720p", "=m18") to Qualities.P720.value,
                         Pair("480p", "=m18") to Qualities.P480.value,
                         Pair("360p", "=m18") to Qualities.P360.value
                     )
 
-                    // Try each variant and emit as separate links so Cloudstream shows them as options
                     for ((qualityInfo, qualityValue) in variants) {
                         val (qualityName, qualityParam) = qualityInfo
                         val qualityUrl = "$baseUrl$qualityParam"
@@ -469,8 +497,7 @@ class An1meProvider : MainAPI() {
             }
 
             // -------------------------------------------------------
-            // M3U8: parse master playlist and expose each track/resolution as a separate M3U8 link
-            // (resolves the "resolution under tracks" case)
+            // M3U8 parsing (master playlist -> separate tracks)
             // -------------------------------------------------------
             if (decodedUrl.contains(".m3u8", true)) {
                 android.util.Log.d("An1me_Video", "Detected M3U8 stream — parsing qualities")
