@@ -76,7 +76,7 @@ class An1meProvider : MainAPI() {
 
             val res = app.post(
                 "https://graphql.anilist.co",
-                data = jsonBody.toString(),
+                json = jsonBody.toString(),
                 headers = mapOf("Content-Type" to "application/json")
             ).text
 
