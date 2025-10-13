@@ -58,25 +58,21 @@ class An1meProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val doc = app.get(mainUrl).document
         val lists = mutableListOf<HomePageList>()
-
         doc.select(".swiper-spotlight .swiper-slide").mapNotNull { it.toSpotlight() }.let {
             if (it.isNotEmpty()) lists.add(HomePageList("Spotlight", it))
         }
-
         doc.select(".swiper-trending .swiper-slide").mapNotNull { it.toSpotlight() }.let {
             if (it.isNotEmpty()) lists.add(HomePageList("Trending", it))
         }
-
         doc.select("section:has(h2:contains(Καινούργια Επεισόδια)) .kira-grid-listing > div")
             .mapNotNull { it.toSearchResult() }.let {
                 if (it.isNotEmpty()) lists.add(HomePageList("Latest Episodes", it))
             }
-
         return HomePageResponse(lists)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val url = "$mainUrl/search/?s_keyword=$query"
+        val url = "$mainUrl/search/?s_keyword=${URLEncoder.encode(query, "UTF-8")}"
         val doc = app.get(url).document
         return doc.select("#first_load_result > div").mapNotNull { it.toSearchResult() }
     }
@@ -107,7 +103,6 @@ class An1meProvider : MainAPI() {
             plot = desc ?: info?.description
             tags = info?.genres
             rating = info?.score
-            trailerUrl = info?.trailer  // ✅ fixed
             addEpisodes(DubStatus.Subbed, episodes)
         }
 
@@ -202,7 +197,7 @@ class An1meProvider : MainAPI() {
                 return true
             }
         } catch (e: Exception) {
-            android.util.Log.e("An1meProvider", "Error loading links", e) // ✅ fixed
+            android.util.Log.e("An1meProvider", "Error loading links", e)
         }
         return false
     }
