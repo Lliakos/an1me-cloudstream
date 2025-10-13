@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import org.json.JSONObject
 import java.util.Base64
+import java.net.URLEncoder
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 
@@ -18,14 +19,16 @@ class An1meProvider : MainAPI() {
 
     private val cache = mutableMapOf<String, LoadResponse>() // caching for reopening app
 
-    private suspend fun newLink(
+    // Helper to create ExtractorLink without using deprecated constructor calls
+    private fun newLinkObj(
         sourceName: String,
         linkName: String,
         url: String,
-        referer: String,
+        referer: String?,
         quality: Int,
         type: ExtractorLinkType = ExtractorLinkType.M3U8
     ): ExtractorLink {
+        // Use the constructor form available in the SDK; keep type argument explicit
         return ExtractorLink(
             source = sourceName,
             name = linkName,
@@ -34,6 +37,16 @@ class An1meProvider : MainAPI() {
             quality = quality,
             type = type
         )
+    }
+
+    private fun encodeM3u8Url(u: String): String {
+        // Minimal percent-encoding for problematic characters in path which break URI parsing.
+        // This encodes spaces and brackets and quotes commonly found in filenames, which fixed your Illegal character errors.
+        return u.replace(" ", "%20")
+            .replace("[", "%5B")
+            .replace("]", "%5D")
+            .replace("\"", "%22")
+            .replace("'", "%27")
     }
 
     private fun Element.toSearchResult(): AnimeSearchResponse? {
@@ -82,23 +95,37 @@ class An1meProvider : MainAPI() {
         val document = app.get(mainUrl).document
         val homePages = mutableListOf<HomePageList>()
 
+        // Spotlight (top top top) - ensure banner images and horizontal look
         try {
-            val trendingItems = document.select(".swiper-trending .swiper-slide").mapNotNull { it.toTrendingResult() }
+            val spotlight = document.select(".kira-hero, .main-spotlight, .spotlight, .top-slider")
+                .firstOrNull()?.select("a[href*='/anime/']")?.mapNotNull { it.toSpotlightResult() }
+            if (!spotlight.isNullOrEmpty()) {
+                // Use the built-in spotlight (horizontal large banners)
+                homePages.add(HomePageList("Spotlight", spotlight, isHorizontalImages = true))
+            }
+        } catch (_: Exception) { }
+
+        // Trending - prefer a horizontal carousel style, but smaller images
+        try {
+            val trendingItems = document.select(".swiper-trending .swiper-slide, .trending .item, .kira-trending .swiper-slide")
+                .mapNotNull { it.toTrendingResult() }
             if (trendingItems.isNotEmpty()) {
                 homePages.add(HomePageList("Trending", trendingItems, isHorizontalImages = true))
             }
         } catch (_: Exception) { }
 
+        // Latest / New Anime
         try {
-            val latestSection = document.selectFirst("section:has(h2:contains(Καινούργια Επεισόδια))")
-            val latest = latestSection?.select(".kira-grid-listing > div")?.mapNotNull { it.toSearchResult() } ?: emptyList()
+            val latestSection = document.selectFirst("section:has(h2:contains(Καινούργια Επεισόδια)), section:has(h2:contains(New Episodes)), .latest")
+            val latest = latestSection?.select(".kira-grid-listing > div, .kira-grid-listing a, .latest .item")?.mapNotNull { it.toSearchResult() } ?: emptyList()
             if (latest.isNotEmpty()) {
                 homePages.add(HomePageList("Latest Episodes", latest))
             }
         } catch (_: Exception) { }
 
+        // Fallback New Anime listing
         try {
-            val items = document.select("li").mapNotNull { it.toSearchResult() }
+            val items = document.select(".kira-grid-listing a, li, .list .item").mapNotNull { it.toSearchResult() }
             if (items.isNotEmpty()) {
                 homePages.add(HomePageList("New Anime", items))
             }
@@ -108,10 +135,10 @@ class An1meProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val searchUrl = "$mainUrl/search/?s_keyword=$query"
+        val searchUrl = "$mainUrl/search/?s_keyword=${URLEncoder.encode(query, "UTF-8")}"
         val document = app.get(searchUrl).document
 
-        return document.select("#first_load_result > div").mapNotNull { item ->
+        return document.select("#first_load_result > div, .search-results .item").mapNotNull { item ->
             val link = item.selectFirst("a[href*='/anime/']") ?: return@mapNotNull null
             val href = fixUrl(link.attr("href"))
             val title = item.selectFirst("span[data-en-title]")?.text()
@@ -129,17 +156,65 @@ class An1meProvider : MainAPI() {
         val poster = fixUrlNull(document.selectFirst("img")?.attr("src"))
         val description = document.selectFirst("div[data-synopsis]")?.text()
 
-        val episodes = mutableListOf<Episode>()
-        document.select("div.episode-list-display-box a.episode-list-item[href*='/watch/']").forEach { ep ->
-            val epUrl = fixUrl(ep.attr("href"))
-            val epNum = ep.selectFirst(".episode-list-item-number")?.text()?.toIntOrNull()
-            val epTitle = ep.selectFirst(".episode-list-item-title")?.text() ?: "Episode $epNum"
-            episodes.add(newEpisode(epUrl) {
-                this.name = epTitle
-                this.episode = epNum ?: episodes.size + 1
+        // Collect episodes from multiple possible structures so we won't miss any
+        val episodesList = mutableListOf<Episode>()
+
+        // 1) Swiper / watch anchors
+        document.select("div.swiper-slide a[href*='/watch/'], a[href*='/watch/'][class*='anime']").forEachIndexed { idx, ep ->
+            val episodeUrl = fixUrl(ep.attr("href"))
+            if (episodeUrl.isEmpty() || episodeUrl.contains("/anime/")) return@forEachIndexed
+            val episodeTitle = ep.attr("title").ifEmpty { ep.text() }
+            val num = Regex("""\b(?:Episode|Ep|E)\s*#?:?\s*(\d+)\b""", RegexOption.IGNORE_CASE).find(episodeTitle)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            episodesList.add(newEpisode(episodeUrl) {
+                this.name = if (episodeTitle.isNotEmpty()) episodeTitle else "Episode ${num ?: idx + 1}"
+                this.episode = num ?: (episodesList.size + 1)
                 this.posterUrl = poster
             })
         }
+
+        // 2) Episode-list-display-box (newer layouts)
+        document.select("div.episode-list-display-box a.episode-list-item[href*='/watch/']").forEachIndexed { idx, ep ->
+            val episodeUrl = fixUrl(ep.attr("href"))
+            if (episodeUrl.isEmpty() || episodeUrl.contains("/anime/")) return@forEachIndexed
+            val epNum = ep.selectFirst(".episode-list-item-number")?.text()?.toIntOrNull()
+            val epTitle = ep.selectFirst(".episode-list-item-title")?.text() ?: ep.attr("title").ifEmpty { ep.text() }
+            episodesList.add(newEpisode(episodeUrl) {
+                this.name = if (epTitle.isNotEmpty()) epTitle else "Episode ${epNum ?: idx + 1}"
+                this.episode = epNum ?: (episodesList.size + 1)
+                this.posterUrl = poster
+            })
+        }
+
+        // 3) Generic anchors fallback (any anchor with /watch/)
+        document.select("a[href*='/watch/']").forEachIndexed { idx, ep ->
+            val episodeUrl = fixUrl(ep.attr("href"))
+            if (episodeUrl.isEmpty() || episodesList.any { it.url == episodeUrl } || episodeUrl.contains("/anime/")) return@forEachIndexed
+            val epTitle = ep.attr("title").ifEmpty { ep.text() }
+            val num = Regex("""\b(?:Episode|Ep|E)\s*#?:?\s*(\d+)\b""", RegexOption.IGNORE_CASE).find(epTitle)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            episodesList.add(newEpisode(episodeUrl) {
+                this.name = if (epTitle.isNotEmpty()) epTitle else "Episode ${num ?: idx + 1}"
+                this.episode = num ?: (episodesList.size + 1)
+                this.posterUrl = poster
+            })
+        }
+
+        // Ensure unique by url
+        val uniqueEpisodes = episodesList.distinctBy { it.url }.toMutableList()
+
+        // If episodes had no numeric ordering, try to infer order from url (trailing number) or keep order found.
+        uniqueEpisodes.forEachIndexed { idx, ep ->
+            if (ep.episode == null) {
+                val fromUrl = Regex("(?i)(?:episode|ep|e)[-_/ ]?(\\d+)").find(ep.url)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                if (fromUrl != null) {
+                    ep.episode = fromUrl
+                } else {
+                    ep.episode = idx + 1
+                }
+            }
+        }
+
+        // Sort episodes by episode number ascending
+        uniqueEpisodes.sortBy { it.episode ?: Int.MAX_VALUE }
 
         val anilistData = getAnilistData(title)
         val response = newAnimeLoadResponse(title, url, TvType.Anime) {
@@ -148,8 +223,7 @@ class An1meProvider : MainAPI() {
             this.plot = description ?: anilistData?.description
             this.tags = anilistData?.genres
             this.rating = anilistData?.score
-            // trailer removed – not supported in this Cloudstream version
-            addEpisodes(DubStatus.Subbed, episodes)
+            addEpisodes(DubStatus.Subbed, uniqueEpisodes)
         }
 
         cache[url] = response
@@ -181,8 +255,7 @@ class An1meProvider : MainAPI() {
             ?: return null
 
         return AnilistInfo(
-            title = media.getJSONObject("title").optString("english")
-                ?: media.getJSONObject("title").optString("romaji"),
+            title = if (media.getJSONObject("title").optString("english").isNullOrBlank()) media.getJSONObject("title").optString("romaji") else media.getJSONObject("title").optString("english"),
             description = media.optString("description"),
             poster = media.getJSONObject("coverImage").optString("large"),
             banner = media.optString("bannerImage"),
@@ -220,45 +293,106 @@ class An1meProvider : MainAPI() {
             val base64Part = iframeSrc.substringAfter("/kr-video/").substringBefore("?")
             val decodedUrl = String(Base64.getDecoder().decode(base64Part))
 
+            // If google photos share page -> try to fetch direct sources from meta tags / source tags
+            if (decodedUrl.contains("photos.google.com")) {
+                try {
+                    val photoDoc = app.get(decodedUrl).document
+                    // Try meta tags: og:video, og:video:url, og:video:secure_url, og:video:type
+                    val candidates = listOf(
+                        photoDoc.selectFirst("meta[property=og:video]")?.attr("content"),
+                        photoDoc.selectFirst("meta[property=og:video:url]")?.attr("content"),
+                        photoDoc.selectFirst("meta[property=og:video:secure_url]")?.attr("content"),
+                        photoDoc.selectFirst("meta[property=og:image]")?.attr("content"),
+                        photoDoc.selectFirst("source[src]")?.attr("src")
+                    ).filterNotNull().map { it.trim() }
+
+                    for (candidate in candidates) {
+                        val urlCandidate = candidate.replace("\\/", "/")
+                        if (urlCandidate.contains(".m3u8", true)) {
+                            // generate M3U8 links
+                            val safeUrl = encodeM3u8Url(urlCandidate)
+                            M3u8Helper.generateM3u8(source = name, streamUrl = safeUrl, referer = decodedUrl).forEach(callback)
+                            return true
+                        } else if (urlCandidate.endsWith(".mp4", true)) {
+                            callback(newLinkObj(name, "$name (MP4)", urlCandidate, decodedUrl, Qualities.Unknown.value, ExtractorLinkType.VIDEO))
+                            return true
+                        }
+                    }
+                } catch (_: Exception) {
+                    // fallthrough to other handlers
+                }
+            }
+
+            // If decoded is an M3U8 master/variant playlist
             if (decodedUrl.contains(".m3u8", true)) {
-                val lines = app.get(decodedUrl).text.lines()
-                lines.forEachIndexed { i, line ->
+                val text = app.get(encodeM3u8Url(decodedUrl)).text
+                val lines = text.lines()
+                lines.forEachIndexed { idx, line ->
                     if (line.startsWith("#EXT-X-STREAM-INF")) {
                         val height = """RESOLUTION=\d+x(\d+)""".toRegex()
                             .find(line)?.groupValues?.getOrNull(1)?.toIntOrNull()
-                        if (i + 1 < lines.size && !lines[i + 1].startsWith("#")) {
-                            val fullUrl = if (lines[i + 1].startsWith("http")) lines[i + 1]
-                            else "${decodedUrl.substringBeforeLast("/")}/${lines[i + 1]}"
-                            callback(
-                                newLink(
-                                    name,
-                                    "${height ?: "Unknown"}p",
-                                    fullUrl,
-                                    data,
-                                    when (height) {
-                                        1080 -> Qualities.P1080.value
-                                        720 -> Qualities.P720.value
-                                        else -> Qualities.Unknown.value
-                                    },
-                                    ExtractorLinkType.M3U8
-                                )
-                            )
+                        if (idx + 1 < lines.size && !lines[idx + 1].startsWith("#")) {
+                            val nextLine = lines[idx + 1].trim()
+                            val fullUrl = if (nextLine.startsWith("http")) nextLine else "${decodedUrl.substringBeforeLast("/")}/${nextLine}"
+                            val safe = encodeM3u8Url(fullUrl)
+                            val quality = when (height) {
+                                2160 -> Qualities.P2160.value
+                                1440 -> Qualities.P1440.value
+                                1080 -> Qualities.P1080.value
+                                720 -> Qualities.P720.value
+                                480 -> Qualities.P480.value
+                                360 -> Qualities.P360.value
+                                else -> Qualities.Unknown.value
+                            }
+                            callback(newLinkObj(name, "$name ${height ?: "Unknown"}p", safe, data, quality, ExtractorLinkType.M3U8))
                         }
                     }
+                }
+                // fallback: master playlist itself if no variants
+                if (lines.none { it.startsWith("#EXT-X-STREAM-INF") }) {
+                    callback(newLinkObj(name, name, encodeM3u8Url(decodedUrl), data, Qualities.Unknown.value, ExtractorLinkType.M3U8))
                 }
                 return true
             }
 
-            if (decodedUrl.endsWith(".mp4")) {
-                callback(
-                    newLink(name, "$name (MP4)", decodedUrl, data, Qualities.Unknown.value, ExtractorLinkType.VIDEO)
-                )
+            // If direct mp4 or other direct video
+            if (decodedUrl.endsWith(".mp4", true)) {
+                callback(newLinkObj(name, "$name (MP4)", decodedUrl, data, Qualities.Unknown.value, ExtractorLinkType.VIDEO))
                 return true
+            }
+
+            // Otherwise, attempt to load the decoded page and find m3u8/mp4 inside scripts
+            if (decodedUrl.startsWith("http")) {
+                val iframeDoc = app.get(decodedUrl).document
+                val scripts = iframeDoc.select("script")
+                val scriptText = scripts.firstOrNull { it.data().contains("sources") || it.data().contains(".m3u8") || it.data().contains(".mp4") }?.data()
+
+                if (!scriptText.isNullOrEmpty()) {
+                    val regexes = listOf(
+                        """"(?:file|url)"\s*:\s*"([^"]+.m3u8[^"]*)"""".toRegex(),
+                        """https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""".toRegex(),
+                        """https?://[^\s"'<>]+\.mp4[^\s"'<>]*""".toRegex()
+                    )
+                    for (r in regexes) {
+                        val m = r.find(scriptText)
+                        if (m != null) {
+                            val candidate = m.groupValues.getOrNull(1) ?: m.value
+                            val cleaned = candidate.replace("\\/", "/").trim()
+                            if (cleaned.contains(".m3u8", true)) {
+                                M3u8Helper.generateM3u8(source = name, streamUrl = encodeM3u8Url(cleaned), referer = decodedUrl).forEach(callback)
+                                return true
+                            } else if (cleaned.endsWith(".mp4", true)) {
+                                callback(newLinkObj(name, "$name (MP4)", cleaned, decodedUrl, Qualities.Unknown.value, ExtractorLinkType.VIDEO))
+                                return true
+                            }
+                        }
+                    }
+                }
             }
 
             return false
         } catch (e: Exception) {
-            android.util.Log.e("An1me_Video", "Error: ${e.message}")
+            android.util.Log.e("An1me_Video", "Error: ${e.message}", e)
             return false
         }
     }
