@@ -5,14 +5,16 @@ import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.extractors.*
 import org.jsoup.Jsoup
 import android.util.Log
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 
 class An1meProvider : MainAPI() {
     override var mainUrl = "https://an1me.to"
     override var name = "An1me"
+    override var lang = "kr"
     override val hasQuickSearch = true
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie)
-    override val lang = "kr"
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val doc = app.get(mainUrl).document
@@ -46,11 +48,11 @@ class An1meProvider : MainAPI() {
         val episodes = doc.select("ul.episodes a").map {
             val epTitle = it.text()
             val epUrl = fixUrl(it.attr("href"))
-            Episode(epUrl, epTitle)
+            newEpisode(epUrl) { name = epTitle }
         }
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = poster
-            this.episodes = episodes
+            this.episodes = mapOf(DubStatus.Subbed to episodes)
         }
     }
 
@@ -72,12 +74,12 @@ class An1meProvider : MainAPI() {
         if (match != null) {
             Log.d("An1me_Video", "Extracted MP4: $match")
             callback.invoke(
-                newExtractorLink(
-                    "An1me",
-                    "WeTransfer",
-                    match,
-                    iframeUrl,
-                    Qualities.P1080.value,
+                ExtractorLink(
+                    source = "An1me",
+                    name = "WeTransfer",
+                    url = match,
+                    referer = iframeUrl,
+                    quality = Qualities.P1080.value,
                     isM3u8 = false
                 )
             )
@@ -93,10 +95,12 @@ class An1meProvider : MainAPI() {
             {"query": "query { Media(search: \"$title\", type: ANIME) { title { romaji english native } description coverImage { large } } }"}
         """.trimIndent()
 
+        val body = query.toRequestBody("application/json".toMediaType())
+
         val response = try {
             app.post(
                 url = "https://graphql.anilist.co",
-                requestBody = requestBodyOf(query),
+                requestBody = body,
                 headers = mapOf("Content-Type" to "application/json")
             )
         } catch (e: Exception) {
