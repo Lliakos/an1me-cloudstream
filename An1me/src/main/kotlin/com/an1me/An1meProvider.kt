@@ -7,6 +7,7 @@ import org.json.JSONObject
 import java.util.Base64
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.net.URLEncoder
 
 @Suppress("DEPRECATION")
 class An1meProvider : MainAPI() {
