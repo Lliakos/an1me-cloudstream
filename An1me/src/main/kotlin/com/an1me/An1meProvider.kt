@@ -45,7 +45,7 @@ class An1meProvider : MainAPI() {
         try {
             val query = """
                 query (${"$"}search: String) {
-                  Media(search: ${"$"}search, type: ANIME) {
+                Media(search: ${"$"}search, type: ANIME) {
                     id
                     title { romaji english native }
                     bannerImage
@@ -55,18 +55,18 @@ class An1meProvider : MainAPI() {
                     episodes
                     description(asHtml: false)
                     characters(page: 1, perPage: 12) {
-                      edges {
+                    edges {
                         role
                         node { name { full } }
-                      }
+                    }
                     }
                     staff(page: 1, perPage: 10) {
-                      edges {
+                    edges {
                         role
                         node { name { full } }
-                      }
                     }
-                  }
+                    }
+                }
                 }
             """.trimIndent()
 
@@ -74,10 +74,11 @@ class An1meProvider : MainAPI() {
                 .put("query", query)
                 .put("variables", JSONObject().put("search", title))
 
-            val res = app.post("https://graphql.anilist.co") {
-                body = jsonBody.toString()
-                headers["Content-Type"] = "application/json"
-            }.text
+            val res = app.post(
+                "https://graphql.anilist.co",
+                data = jsonBody.toString(),
+                headers = mapOf("Content-Type" to "application/json")
+            ).text
 
             val media = JSONObject(res).optJSONObject("data")?.optJSONObject("Media")
             if (media != null) {
@@ -89,6 +90,7 @@ class An1meProvider : MainAPI() {
             return null
         }
     }
+
 
     private suspend fun createLink(
         sourceName: String,
