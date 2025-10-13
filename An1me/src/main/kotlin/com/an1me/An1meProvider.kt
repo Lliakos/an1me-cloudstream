@@ -18,7 +18,6 @@ class An1meProvider : MainAPI() {
 
     private val cache = mutableMapOf<String, LoadResponse>()
 
-    // ✅ Use suspend newExtractorLink
     private suspend fun makeLink(
         source: String,
         name: String,
@@ -47,7 +46,6 @@ class An1meProvider : MainAPI() {
         return newAnimeSearchResponse(title, href, TvType.Anime) { posterUrl = poster }
     }
 
-    // ✅ Spotlight (Top Slider)
     private fun Element.toSpotlight(): AnimeSearchResponse? {
         val link = selectFirst("a[href*='/anime/']") ?: return null
         val href = fixUrl(link.attr("href"))
@@ -61,17 +59,14 @@ class An1meProvider : MainAPI() {
         val doc = app.get(mainUrl).document
         val lists = mutableListOf<HomePageList>()
 
-        // Spotlight / top carousel
         doc.select(".swiper-spotlight .swiper-slide").mapNotNull { it.toSpotlight() }.let {
             if (it.isNotEmpty()) lists.add(HomePageList("Spotlight", it))
         }
 
-        // Trending
         doc.select(".swiper-trending .swiper-slide").mapNotNull { it.toSpotlight() }.let {
             if (it.isNotEmpty()) lists.add(HomePageList("Trending", it))
         }
 
-        // Latest episodes
         doc.select("section:has(h2:contains(Καινούργια Επεισόδια)) .kira-grid-listing > div")
             .mapNotNull { it.toSearchResult() }.let {
                 if (it.isNotEmpty()) lists.add(HomePageList("Latest Episodes", it))
@@ -94,7 +89,6 @@ class An1meProvider : MainAPI() {
         val poster = fixUrlNull(doc.selectFirst("img")?.attr("src"))
         val desc = doc.selectFirst("div[data-synopsis]")?.text()
 
-        // ✅ Full episode list
         val episodes = doc.select("a.episode-list-item[href*='/watch/']").mapIndexed { index, ep ->
             val epUrl = fixUrl(ep.attr("href"))
             val epNum = ep.selectFirst(".episode-list-item-number")?.text()?.toIntOrNull() ?: index + 1
@@ -113,7 +107,7 @@ class An1meProvider : MainAPI() {
             plot = desc ?: info?.description
             tags = info?.genres
             rating = info?.score
-            trailer = info?.trailer
+            trailerUrl = info?.trailer  // ✅ fixed
             addEpisodes(DubStatus.Subbed, episodes)
         }
 
@@ -208,7 +202,7 @@ class An1meProvider : MainAPI() {
                 return true
             }
         } catch (e: Exception) {
-            logError(e)
+            android.util.Log.e("An1meProvider", "Error loading links", e) // ✅ fixed
         }
         return false
     }
