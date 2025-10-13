@@ -5,8 +5,6 @@ import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import org.json.JSONObject
 import java.util.Base64
-import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
 
 @Suppress("DEPRECATION")
 class An1meProvider : MainAPI() {
@@ -16,51 +14,23 @@ class An1meProvider : MainAPI() {
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Anime)
 
-    // Small cache so reopening doesn't req-scrape immediately
-    private val cache = mutableMapOf<String, LoadResponse>()
-
-    // Helper: percent-encode only characters that break URIs (spaces, brackets)
-    private fun encodeProblematicUrl(u: String): String {
-        return u.replace(" ", "%20")
-            .replace("[", "%5B")
-            .replace("]", "%5D")
-            .replace("\"", "%22")
-    }
-
-    // Use the modern newExtractorLink (suspend) inside suspend functions
-    private suspend fun newLinkSuspend(
+    private suspend fun createLink(
         sourceName: String,
         linkName: String,
         url: String,
-        referer: String?,
+        referer: String,
         quality: Int,
         type: ExtractorLinkType = ExtractorLinkType.M3U8
     ): ExtractorLink {
-        // newExtractorLink is suspend; call it from suspend contexts
-        return newExtractorLink(source = sourceName, name = linkName, url = url, type = type) {
-            this.referer = referer
-            this.quality = quality
-        }
-    }
-
-    // Older constructor fallback (non-suspend) — kept for any places that still expect quick ExtractorLink
-    private fun newLinkQuick(
-        sourceName: String,
-        linkName: String,
-        url: String,
-        referer: String?,
-        quality: Int,
-        type: ExtractorLinkType = ExtractorLinkType.M3U8
-    ): ExtractorLink {
-        // This constructor may be deprecated but still works at runtime; prefer suspend newLinkSuspend where possible.
-        return ExtractorLink(
+        return newExtractorLink(
             source = sourceName,
             name = linkName,
             url = url,
-            referer = referer,
-            quality = quality,
             type = type
-        )
+        ) {
+            this.referer = referer
+            this.quality = quality
+        }
     }
 
     private fun Element.toSearchResult(): AnimeSearchResponse? {
@@ -84,9 +54,13 @@ class An1meProvider : MainAPI() {
     private fun Element.toSpotlightResult(): AnimeSearchResponse? {
         val link = this.selectFirst("a[href*='/anime/']") ?: return null
         val href = fixUrl(link.attr("href"))
-        val title = this.selectFirst("span[data-en-title]")?.text()
-            ?: this.selectFirst("span[data-nt-title]")?.text() ?: return null
-        val bannerUrl = this.selectFirst("img[src*='banner']")?.attr("src")
+
+        val enTitle = this.selectFirst("span[data-en-title]")?.text()
+        val ntTitle = this.selectFirst("span[data-nt-title]")?.text()
+        val title = enTitle ?: ntTitle ?: return null
+
+        // Get banner image (the spotlight uses banner images)
+        val bannerUrl = this.selectFirst("img[src*='anilist.co/file/anilistcdn/media/anime/banner']")?.attr("src")
             ?: this.selectFirst("img")?.attr("src")
 
         return newAnimeSearchResponse(title, href, TvType.Anime) {
@@ -97,9 +71,28 @@ class An1meProvider : MainAPI() {
     private fun Element.toTrendingResult(): AnimeSearchResponse? {
         val link = this.selectFirst("a[href*='/anime/']") ?: return null
         val href = fixUrl(link.attr("href"))
-        val title = this.selectFirst("span[data-en-title]")?.text()
-            ?: this.selectFirst("span[data-nt-title]")?.text() ?: return null
+
+        val enTitle = this.selectFirst("span[data-en-title]")?.text()
+        val ntTitle = this.selectFirst("span[data-nt-title]")?.text()
+        val title = enTitle ?: ntTitle ?: return null
+
         val posterUrl = fixUrlNull(this.selectFirst("img")?.attr("src"))
+
+        return newAnimeSearchResponse(title, href, TvType.Anime) {
+            this.posterUrl = posterUrl
+        }
+    }
+
+    private fun Element.toLatestEpisodeResult(): AnimeSearchResponse? {
+        val link = this.selectFirst("a[href*='/anime/']") ?: return null
+        val href = fixUrl(link.attr("href"))
+
+        val enTitle = this.selectFirst("span[data-en-title]")?.text()
+        val ntTitle = this.selectFirst("span[data-nt-title]")?.text()
+        val title = enTitle ?: ntTitle ?: return null
+
+        val posterUrl = fixUrlNull(this.selectFirst("img")?.attr("src"))
+
         return newAnimeSearchResponse(title, href, TvType.Anime) {
             this.posterUrl = posterUrl
         }
@@ -109,224 +102,173 @@ class An1meProvider : MainAPI() {
         val document = app.get(mainUrl).document
         val homePages = mutableListOf<HomePageList>()
 
+        // Trending Section
         try {
-            // Spotlight / top banner (use first large banner group)
-            val spotlight = document.select(".kira-spotlight li, .kira-slider li").mapNotNull { it.toSpotlightResult() }
-            if (spotlight.isNotEmpty()) homePages.add(HomePageList("Spotlight", spotlight, isHorizontalImages = true))
-        } catch (_: Exception) { }
-
-        try {
-            val trendingItems = document.select(".swiper-trending .swiper-slide").mapNotNull { it.toTrendingResult() }
+            val trendingItems = document.select(".swiper-trending .swiper-slide").mapNotNull { 
+                it.toTrendingResult() 
+            }
             if (trendingItems.isNotEmpty()) {
-                // trending smaller items horizontally
-                homePages.add(HomePageList("Trending", trendingItems, isHorizontalImages = true))
+                homePages.add(HomePageList("Τάσεις", trendingItems, isHorizontalImages = true))
             }
-        } catch (_: Exception) { }
+        } catch (e: Exception) {
+            android.util.Log.e("An1me_MainPage", "Error parsing trending: ${e.message}")
+        }
 
+        // Latest Episodes Section
         try {
-            val latestSection = document.selectFirst("section:has(h2:contains(Καινούργια Επεισόδια)), section:has(h2:contains(New Episodes))")
-            val latest = latestSection?.select(".kira-grid-listing > div, .kira-grid-listing .kira-item")?.mapNotNull { it.toSearchResult() } ?: emptyList()
-            if (latest.isNotEmpty()) homePages.add(HomePageList("Latest Episodes", latest))
-        } catch (_: Exception) { }
+            val latestEpisodesSection = document.selectFirst("section:has(h2:contains(Καινούργια Επεισόδια))")
+            val latestEpisodeItems = latestEpisodesSection?.select(".kira-grid-listing > div")?.mapNotNull { 
+                it.toLatestEpisodeResult() 
+            } ?: emptyList()
+            if (latestEpisodeItems.isNotEmpty()) {
+                homePages.add(HomePageList("Καινούργια Επεισόδια", latestEpisodeItems))
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("An1me_MainPage", "Error parsing latest episodes: ${e.message}")
+        }
 
+        // Latest Anime Section
         try {
-            val items = document.select(".kira-grid-listing a[href*='/anime/'], li a[href*='/anime/']").mapNotNull { it.parent()?.toSearchResult() ?: it.toSearchResult() }
+            val items = document.select("li").mapNotNull { it.toSearchResult() }
             if (items.isNotEmpty()) {
-                homePages.add(HomePageList("New Anime", items))
+                homePages.add(HomePageList("Καινούργια Anime", items))
             }
-        } catch (_: Exception) { }
+        } catch (e: Exception) {
+            android.util.Log.e("An1me_MainPage", "Error parsing latest anime: ${e.message}")
+        }
 
         return HomePageResponse(homePages)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val searchUrl = "$mainUrl/search/?s_keyword=${URLEncoder.encode(query, StandardCharsets.UTF_8.toString())}"
+        val searchUrl = "$mainUrl/search/?s_keyword=$query"
         val document = app.get(searchUrl).document
 
-        return document.select("#first_load_result > div, .kira-grid-listing > div, .search-result-item").mapNotNull { item ->
+        return document.select("#first_load_result > div").mapNotNull { item ->
             val link = item.selectFirst("a[href*='/anime/']") ?: return@mapNotNull null
             val href = fixUrl(link.attr("href"))
-            val title = item.selectFirst("span[data-en-title]")?.text()
-                ?: item.selectFirst("span[data-nt-title]")?.text() ?: return@mapNotNull null
+
+            val enTitle = item.selectFirst("span[data-en-title]")?.text()
+            val ntTitle = item.selectFirst("span[data-nt-title]")?.text()
+            val title = enTitle ?: ntTitle ?: return@mapNotNull null
+
             val posterUrl = fixUrlNull(item.selectFirst("img")?.attr("src"))
-            newAnimeSearchResponse(title, href, TvType.Anime) { this.posterUrl = posterUrl }
+
+            newAnimeSearchResponse(title, href, TvType.Anime) {
+                this.posterUrl = posterUrl
+            }
         }
     }
 
     override suspend fun load(url: String): LoadResponse {
-        cache[url]?.let { return it } // return cached if exists
-
         val document = app.get(url).document
+
         val title = document.selectFirst("h1.entry-title, h1")?.text() ?: "Unknown"
         val poster = fixUrlNull(document.selectFirst("img")?.attr("src"))
         val description = document.selectFirst("div[data-synopsis]")?.text()
 
-        // Gather episodes robustly:
-        // 1) Look for explicit episode list items
-        val episodes = mutableListOf<Episode>()
-        try {
-            // Common internal anime pages use a list with anchor .episode-list-item or swiper slides or .kira-episodes
-            val epElements = document.select(
-                "div.episode-list-display-box a.episode-list-item[href*='/watch/']," +
-                        "a[href*='/watch/'][class*='anime']," +
-                        "li a[href*='/watch/']," +
-                        ".kira-episodes a[href*='/watch/']," +
-                        ".episode-item a[href*='/watch/']"
-            )
+        // Get background/banner from MAL if available
+        val bannerUrl = document.selectFirst("img[src*='anilist.co/file/anilistcdn/media/anime/banner']")?.attr("src")
+            ?: poster
 
-            epElements.forEach { ep ->
-                val epUrl = fixUrl(ep.attr("href"))
-                if (epUrl.isEmpty() || epUrl.contains("/anime/")) return@forEach
-                val epTitle = ep.selectFirst(".episode-list-item-title")?.text() ?: ep.attr("title") ?: ep.text()
-                // attempt to derive episode number
-                val epNum = Regex("(?:Episode|EP|Ep|E)\\s*(\\d+)", RegexOption.IGNORE_CASE).find(epTitle)?.groupValues?.getOrNull(1)?.toIntOrNull()
-                    ?: ep.selectFirst(".episode-list-item-number")?.text()?.toIntOrNull()
-                    ?: episodes.size + 1
-                episodes.add(newEpisode(epUrl) {
-                    this.name = epTitle
-                    this.episode = epNum
+        val tags = document.select("li:has(span:containsOwn(Είδος:)) a[href*='/genre/']").map {
+            it.text().trim()
+        }
+
+        // Extract metadata
+        val malScore = document.selectFirst("li:has(span:contains(MAL Βαθμολογια:))")
+            ?.text()?.substringAfter(":")?.trim()
+        val status = document.selectFirst("li:has(span:contains(Κατάσταση:)) a")?.text()
+        val premiered = document.selectFirst("li:has(span:contains(Πρεμιέρα:))")
+            ?.text()?.substringAfter(":")?.trim()
+        val aired = document.selectFirst("li:has(span:contains(Προβλήθηκε:))")
+            ?.text()?.substringAfter(":")?.trim()
+        val duration = document.selectFirst("li:has(span:contains(Διάρκεια:))")
+            ?.text()?.substringAfter(":")?.trim()
+        val episodeCount = document.selectFirst("li:has(span:contains(Επεισόδια:))")
+            ?.text()?.substringAfter(":")?.trim()
+        val studio = document.selectFirst("li:has(span:contains(Στούντιο:)) a")?.text()
+
+        // Build enhanced description
+        val enhancedDescription = buildString {
+            description?.let { append(it).append("\n\n") }
+            append("━━━━━━━━━━━━━━━━\n")
+            malScore?.let { append("⭐ MAL Score: $it\n") }
+            status?.let { append("📺 Status: $it\n") }
+            episodeCount?.let { append("🎬 Episodes: $it\n") }
+            duration?.let { append("⏱️ Duration: $it\n") }
+            aired?.let { append("📅 Aired: $it\n") }
+            premiered?.let { append("🎭 Premiered: $it\n") }
+            studio?.let { append("🎨 Studio: $it") }
+        }
+
+        // Extract trailer
+        var trailerUrl: String? = null
+        try {
+            val trailerButton = document.selectFirst("a:contains(Watch Trailer), a:has(span:contains(Watch Trailer))")
+            if (trailerButton != null) {
+                val onclickAttr = trailerButton.attr("onclick")
+                val youtubeRegex = """(?:youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]{11})""".toRegex()
+                val match = youtubeRegex.find(onclickAttr)
+                if (match != null) {
+                    trailerUrl = "https://www.youtube.com/watch?v=${match.groupValues[1]}"
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("An1me_Trailer", "Error extracting trailer: ${e.message}")
+        }
+
+        // Get ALL episodes - the list has class "hidden" but contains all episodes
+        val episodes = mutableListOf<Episode>()
+        
+        // Get episodes from the episode list box (even though it has "hidden" class, the HTML is there)
+        val episodeListBox = document.selectFirst("div.episode-list-display-box")
+        if (episodeListBox != null) {
+            episodeListBox.select("a.episode-list-item[href*='/watch/']").forEach { ep ->
+                val episodeUrl = fixUrl(ep.attr("href"))
+                if (episodeUrl.isEmpty() || episodeUrl.contains("/anime/")) return@forEach
+
+                val episodeNumberText = ep.selectFirst(".episode-list-item-number")?.text()
+                val episodeNumber = episodeNumberText?.trim()?.toIntOrNull() ?: return@forEach
+
+                val episodeTitle = ep.selectFirst(".episode-list-item-title")?.text()?.trim() ?: "Episode $episodeNumber"
+
+                episodes.add(newEpisode(episodeUrl) {
+                    this.name = episodeTitle
+                    this.episode = episodeNumber
                     this.posterUrl = poster
                 })
             }
-        } catch (_: Exception) { }
-
-        // 2) If no episodes found, try to extract JSON embedded in scripts (kiranime returns JSON sometimes)
+        }
+        
+        // Fallback: if episode list is empty, try swiper slides
         if (episodes.isEmpty()) {
-            try {
-                val scripts = document.select("script").map { it.data() ?: "" }.joinToString("\n")
-                // Try to find "episodes": [ ... ] blocks
-                val epJsonMatch = Regex("""(?s)"episodes"\s*:\s*(\[[^\]]+\])""").find(scripts)
-                if (epJsonMatch != null) {
-                    val arrText = epJsonMatch.groupValues[1]
-                    val arr = JSONObject("{\"a\":$arrText}").getJSONArray("a")
-                    for (i in 0 until arr.length()) {
-                        val epObj = arr.getJSONObject(i)
-                        val epUrl = epObj.optString("url").ifEmpty { epObj.optString("watch_url") }
-                        if (epUrl.isNullOrEmpty()) continue
-                        val fullUrl = fixUrl(epUrl)
-                        val epTitle = epObj.optString("title").ifEmpty { "Episode ${i + 1}" }
-                        val epNum = epObj.optInt("episode", -1).let { if (it < 0) null else it } ?: (i + 1)
-                        episodes.add(newEpisode(fullUrl) {
-                            this.name = epTitle
-                            this.episode = epNum
-                            this.posterUrl = poster
-                        })
-                    }
-                }
-            } catch (_: Exception) { }
-        }
+            document.select("div.swiper-slide a[href*='/watch/']").forEach { ep ->
+                val episodeUrl = fixUrl(ep.attr("href"))
+                if (episodeUrl.isEmpty() || episodeUrl.contains("/anime/")) return@forEach
 
-        // 3) Attempt to fetch episodes via site API if there is a post ID or data-post attribute
-        if (episodes.isEmpty()) {
-            try {
-                val postId = document.selectFirst("[data-post], [data-id], input#post_id")?.attr("data-post")
-                    ?: document.selectFirst("[data-post]")?.attr("data-post")
-                    ?: document.selectFirst("input#post_id")?.attr("value")
-                if (!postId.isNullOrEmpty()) {
-                    // try the kiranime JSON endpoint (may require nonce on some installs — but many sites allow public)
-                    val apiUrl = "$mainUrl/wp-json/kiranime/v1/anime/view?id=$postId"
-                    try {
-                        val json = app.get(apiUrl).parsed<JsonObject>()
-                        val jEpisodes = json.getJSONArray("episodes")
-                        if (jEpisodes != null) {
-                            for (i in 0 until jEpisodes.length()) {
-                                val obj = jEpisodes.getJSONObject(i)
-                                val id = obj.optString("id")
-                                val titleEp = obj.optString("title").ifEmpty { "Episode ${i + 1}" }
-                                val epUrl = "$mainUrl/watch/$id"
-                                val epNum = obj.optInt("episode", i + 1)
-                                episodes.add(newEpisode(epUrl) {
-                                    this.name = titleEp
-                                    this.episode = epNum
-                                    this.posterUrl = poster
-                                })
-                            }
-                        }
-                    } catch (_: Exception) {
-                        // ignore api fail and continue fallback
-                    }
-                }
-            } catch (_: Exception) { }
-        }
+                val episodeTitle = ep.attr("title")
+                val episodeNumber = Regex("Episode\\s*(\\d+)|E\\s*(\\d+)", RegexOption.IGNORE_CASE)
+                    .find(episodeTitle)?.groupValues?.filterNot { it.isEmpty() }?.lastOrNull()?.toIntOrNull() ?: episodes.size + 1
 
-        // Ensure episodes sorted by episode number and no duplicates
-        val sortedEpisodes = episodes.distinctBy { it.url }.sortedBy { it.episode ?: Int.MAX_VALUE }
-
-        // Keep AniList lookups but *only* for additional metadata; prefer on-site data counts & episodes
-        val anilistData = try { getAnilistData(title) } catch (_: Exception) { null }
-
-        val response = newAnimeLoadResponse(title, url, TvType.Anime) {
-            this.posterUrl = poster ?: anilistData?.poster
-            this.backgroundPosterUrl = anilistData?.banner
-            this.plot = description ?: anilistData?.description
-            this.tags = anilistData?.genres
-            this.rating = anilistData?.score
-            // anilist trailer is an external youtube url; map to trailerUrl if available
-            this.trailerUrl = anilistData?.trailer
-            addEpisodes(DubStatus.Subbed, sortedEpisodes)
-        }
-
-        cache[url] = response
-        return response
-    }
-
-    private suspend fun getAnilistData(title: String): AnilistInfo? {
-        val query = """
-            {
-              Page(perPage: 1) {
-                media(search: "${escapeForGraphql(title)}", type: ANIME) {
-                  title { romaji english native }
-                  description(asHtml: false)
-                  coverImage { large }
-                  bannerImage
-                  genres
-                  averageScore
-                  trailer { id site }
-                }
-              }
+                episodes.add(newEpisode(episodeUrl) {
+                    this.name = "Episode $episodeNumber"
+                    this.episode = episodeNumber
+                    this.posterUrl = poster
+                })
             }
-        """.trimIndent()
+        }
+        
+        episodes.sortBy { it.episode }
 
-        val body = JSONObject(mapOf("query" to query)).toString()
-            .toRequestBody("application/json".toMediaTypeOrNull())
-        val res = app.post("https://graphql.anilist.co", requestBody = body).text
-        val json = JSONObject(res)
-        val media = json.getJSONObject("data").getJSONObject("Page").getJSONArray("media").optJSONObject(0)
-            ?: return null
-
-        return AnilistInfo(
-            title = media.getJSONObject("title").optString("english")
-                .ifEmpty { media.getJSONObject("title").optString("romaji").ifEmpty { media.getJSONObject("title").optString("native") } },
-            description = media.optString("description"),
-            poster = media.getJSONObject("coverImage").optString("large"),
-            banner = media.optString("bannerImage"),
-            genres = media.optJSONArray("genres")?.let { arr ->
-                (0 until arr.length()).map { arr.getString(it) }
-            } ?: emptyList(),
-            score = if (media.has("averageScore")) media.optInt("averageScore") else null,
-            trailer = media.optJSONObject("trailer")?.let {
-                if (it.optString("site").equals("youtube", true))
-                    "https://www.youtube.com/watch?v=${it.optString("id")}" else null
-            }
-        )
+        return newAnimeLoadResponse(title, url, TvType.Anime) {
+            this.posterUrl = poster
+            this.plot = enhancedDescription
+            this.tags = tags
+            addEpisodes(DubStatus.Subbed, episodes)
+        }
     }
 
-    private fun escapeForGraphql(input: String): String {
-        // escape quotes and backslashes for embedding in a GraphQL string literal
-        return input.replace("\\", "\\\\").replace("\"", "\\\"")
-    }
-
-    data class AnilistInfo(
-        val title: String?,
-        val description: String?,
-        val poster: String?,
-        val banner: String?,
-        val genres: List<String>,
-        val score: Int?,
-        val trailer: String?
-    )
-
-    // loadLinks is a suspend function so we can call newExtractorLink (suspend) inside it
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -335,35 +277,143 @@ class An1meProvider : MainAPI() {
     ): Boolean {
         try {
             val document = app.get(data).document
-            val iframeSrc = document.selectFirst("iframe[src*='kr-video']")?.attr("src") ?: return false
+            val iframeSrc = document.selectFirst("iframe[src*='kr-video']")?.attr("src")
+                ?: return false.also { android.util.Log.d("An1me_Video", "No iframe found") }
+
+            android.util.Log.d("An1me_Video", "Iframe src: $iframeSrc")
 
             val base64Part = iframeSrc.substringAfter("/kr-video/").substringBefore("?")
-            if (base64Part.isEmpty()) return false
+            if (base64Part.isEmpty()) return false.also {
+                android.util.Log.d("An1me_Video", "No base64 part found")
+            }
+
             val decodedUrl = String(Base64.getDecoder().decode(base64Part))
+            android.util.Log.d("An1me_Video", "Decoded URL: $decodedUrl")
 
-            // If decodedUrl contains encoded characters, keep them encoded where necessary
-            val cleanedDecoded = decodedUrl.trim()
+            // Handle WeTransfer
+            if (decodedUrl.contains("wetransfer.com", true) || decodedUrl.contains("collect.wetransfer.com", true)) {
+                android.util.Log.d("An1me_Video", "Detected WeTransfer link, attempting extraction...")
 
-            // Case 1: Direct m3u8/playlist
-            if (cleanedDecoded.contains(".m3u8", ignoreCase = true)) {
-                val text = try { app.get(encodeProblematicUrl(cleanedDecoded)).text } catch (e: Exception) {
-                    // fallback without encoding full url
-                    app.get(cleanedDecoded).text
+                try {
+                    val iframeHtml = app.get(iframeSrc).text
+                    val cleanedHtml = iframeHtml
+                        .replace("&quot;", "\"")
+                        .replace("&amp;", "&")
+                        .replace("&lt;", "<")
+                        .replace("&gt;", ">")
+                        .replace("\\u003c", "<")
+                        .replace("\\u003e", ">")
+                        .replace("\\\\", "\\")
+                        .replace("\\/", "/")
+
+                    val match = Regex("""const\s+params\s*=\s*(\{.*?"sources".*?\});""", RegexOption.DOT_MATCHES_ALL)
+                        .find(cleanedHtml)
+                        ?.groupValues?.get(1)
+
+                    if (match == null) {
+                        android.util.Log.d("An1me_Video", "No JSON params found in WeTransfer iframe")
+                        return false
+                    }
+
+                    val json = JSONObject(match)
+                    val sources = json.optJSONArray("sources")
+                    if (sources != null && sources.length() > 0) {
+                        val videoUrl = sources.getJSONObject(0).getString("url")
+                            .replace("\\/", "/")
+                            .replace("\\u0026", "&")
+                            .replace("\\u003d", "=")
+
+                        android.util.Log.d("An1me_Video", "Found WeTransfer video URL: $videoUrl")
+
+                        callback(
+                            createLink(
+                                sourceName = name,
+                                linkName = "$name (WeTransfer)",
+                                url = videoUrl,
+                                referer = iframeSrc,
+                                quality = if (videoUrl.contains("1080")) Qualities.P1080.value else Qualities.Unknown.value,
+                                type = ExtractorLinkType.VIDEO
+                            )
+                        )
+                        return true
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("An1me_Video", "Error parsing WeTransfer iframe: ${e.message}", e)
+                    return false
                 }
-                val lines = text.lines()
-                var found = false
-                lines.forEachIndexed { i, line ->
-                    if (line.startsWith("#EXT-X-STREAM-INF")) {
-                        found = true
-                        val height = """RESOLUTION=\d+x(\d+)""".toRegex().find(line)?.groupValues?.getOrNull(1)?.toIntOrNull()
-                        val urlLine = if (i + 1 < lines.size) lines[i + 1] else null
-                        if (urlLine != null && !urlLine.startsWith("#")) {
-                            val fullUrl = if (urlLine.startsWith("http", true)) {
-                                encodeProblematicUrl(urlLine)
-                            } else {
-                                val base = cleanedDecoded.substringBeforeLast("/")
-                                encodeProblematicUrl("$base/$urlLine")
-                            }
+            }
+
+            // Handle Google Photos
+            if (decodedUrl.contains("photos.google.com", true)) {
+                try {
+                    android.util.Log.d("An1me_Video", "Detected Google Photos source — extracting all quality variants")
+
+                    val photoHtml = app.get(decodedUrl, referer = iframeSrc).text
+                    
+                    val videoRegex = Regex("""(https:\/\/[^"'\s]+googleusercontent\.com[^"'\s]+)""")
+                    val matches = videoRegex.findAll(photoHtml).toList()
+                    
+                    if (matches.isEmpty()) {
+                        android.util.Log.d("An1me_Video", "No googleusercontent links found")
+                        return false
+                    }
+                    
+                    val qualityVariants = listOf(
+                        Pair("1080p", "=m37") to Qualities.P1080.value,
+                        Pair("720p", "=m22") to Qualities.P720.value,
+                        Pair("480p", "=m18") to Qualities.P480.value,
+                        Pair("360p", "=m18") to Qualities.P360.value
+                    )
+                    
+                    val baseUrl = matches.first().value
+                        .replace("\\u003d", "=")
+                        .replace("\\u0026", "&")
+                        .replace("\\/", "/")
+                        .replace("\\", "")
+                        .substringBefore("=m")
+                        .substringBefore("?")
+                    
+                    android.util.Log.d("An1me_Video", "Base Google Photos URL: $baseUrl")
+                    
+                    for ((qualityInfo, qualityValue) in qualityVariants) {
+                        val (qualityName, qualityParam) = qualityInfo
+                        val qualityUrl = "$baseUrl$qualityParam"
+                        
+                        android.util.Log.d("An1me_Video", "Adding $qualityName: $qualityUrl")
+                        
+                        callback(
+                            createLink(
+                                sourceName = name,
+                                linkName = qualityName,
+                                url = qualityUrl,
+                                referer = decodedUrl,
+                                quality = qualityValue,
+                                type = ExtractorLinkType.VIDEO
+                            )
+                        )
+                    }
+                    return true
+                    
+                } catch (e: Exception) {
+                    android.util.Log.e("An1me_Video", "Error extracting Google Photos video: ${e.message}", e)
+                    return false
+                }
+            }
+
+            // Handle M3U8
+            if (decodedUrl.contains(".m3u8", true)) {
+                android.util.Log.d("An1me_Video", "Detected M3U8 stream — parsing qualities")
+                
+                try {
+                    val m3u8Response = app.get(decodedUrl).text
+                    val lines = m3u8Response.lines()
+                    var addedAnyQuality = false
+
+                    lines.forEachIndexed { index, line ->
+                        if (line.startsWith("#EXT-X-STREAM-INF")) {
+                            val height = """RESOLUTION=\d+x(\d+)""".toRegex()
+                                .find(line)?.groupValues?.get(1)?.toIntOrNull()
+                            
                             val quality = when (height) {
                                 2160 -> Qualities.P2160.value
                                 1440 -> Qualities.P1440.value
@@ -373,80 +423,82 @@ class An1meProvider : MainAPI() {
                                 360 -> Qualities.P360.value
                                 else -> Qualities.Unknown.value
                             }
-                            // Use suspend newExtractorLink
-                            callback(newLinkQuick(name, "$name ${height ?: "Unknown"}p", fullUrl, data, quality, ExtractorLinkType.M3U8))
-                        }
-                    }
-                }
-                // If no multi-variant entries found, return the master playlist as a single m3u8 link
-                if (!found) {
-                    callback(newLinkQuick(name, name, encodeProblematicUrl(cleanedDecoded), data, Qualities.Unknown.value, ExtractorLinkType.M3U8))
-                }
-                return true
-            }
 
-            // Case 2: direct mp4
-            if (cleanedDecoded.endsWith(".mp4", ignoreCase = true)) {
-                callback(newLinkQuick(name, "$name (MP4)", cleanedDecoded, data, Qualities.Unknown.value, ExtractorLinkType.VIDEO))
-                return true
-            }
+                            if (index + 1 < lines.size) {
+                                val urlLine = lines[index + 1]
+                                if (!urlLine.startsWith("#")) {
+                                    val fullUrl = if (urlLine.startsWith("http")) {
+                                        urlLine
+                                    } else {
+                                        "${decodedUrl.substringBeforeLast("/")}/$urlLine"
+                                    }
 
-            // Case 3: iframe page with scripts (common for many hosts)
-            if (cleanedDecoded.startsWith("http", true)) {
-                val iframeDoc = app.get(cleanedDecoded).document
-                val scripts = iframeDoc.select("script").map { it.data() ?: "" }
-                // Attempt to find URLs in JS: sources, file, url, "sources": [...]
-                val patterns = listOf(
-                    """"file"\s*:\s*"([^"]+)"""",
-                    """"url"\s*:\s*"([^"]+)"""",
-                    """https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""",
-                    """https?://[^\s"'<>]+\.mp4[^\s"'<>]*"""
-                )
-                for (script in scripts) {
-                    for (pattern in patterns) {
-                        val match = pattern.toRegex().find(script)
-                        if (match != null) {
-                            // group 1 for capturing patterns, or whole match for bare url pattern
-                            val extracted = match.groupValues.getOrNull(1)?.replace("\\/", "/")?.replace("\\", "") ?: match.value
-                            val ex = extracted.trim()
-                            if (ex.contains(".m3u8", true)) {
-                                // generate m3u8 entries
-                                M3u8Helper.generateM3u8(source = name, streamUrl = encodeProblematicUrl(ex), referer = cleanedDecoded).forEach { callback(it) }
-                                return true
-                            } else if (ex.endsWith(".mp4", true)) {
-                                callback(newLinkQuick(name, "$name (MP4)", ex, cleanedDecoded, Qualities.Unknown.value, ExtractorLinkType.VIDEO))
-                                return true
-                            } else {
-                                // unknown but attempt multi-handling
-                                callback(newLinkQuick(name, name, ex, cleanedDecoded, Qualities.Unknown.value, ExtractorLinkType.OTHER))
-                                return true
+                                    val safeUrl = fullUrl
+                                        .replace(" ", "%20")
+                                        .replace("[", "%5B")
+                                        .replace("]", "%5D")
+
+                                    callback(
+                                        createLink(
+                                            sourceName = name,
+                                            linkName = "${height}p",
+                                            url = safeUrl,
+                                            referer = data,
+                                            quality = quality,
+                                            type = ExtractorLinkType.M3U8
+                                        )
+                                    )
+                                    addedAnyQuality = true
+                                }
                             }
                         }
                     }
-                }
 
-                // Google Photos / Drive common fallback: try to parse page for direct media
-                if (cleanedDecoded.contains("photos.google.com") || cleanedDecoded.contains("drive.google.com")) {
-                    val pageText = iframeDoc.html()
-                    val anyM3 = """https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""".toRegex().find(pageText)?.value
-                    if (anyM3 != null) {
-                        M3u8Helper.generateM3u8(source = name, streamUrl = encodeProblematicUrl(anyM3), referer = cleanedDecoded).forEach { callback(it) }
-                        return true
+                    if (!addedAnyQuality) {
+                        val safeUrl = decodedUrl
+                            .replace(" ", "%20")
+                            .replace("[", "%5B")
+                            .replace("]", "%5D")
+                        
+                        callback(
+                            createLink(
+                                sourceName = name,
+                                linkName = name,
+                                url = safeUrl,
+                                referer = data,
+                                quality = Qualities.Unknown.value,
+                                type = ExtractorLinkType.M3U8
+                            )
+                        )
                     }
-                    val anyMp4 = """https?://[^\s"'<>]+\.mp4[^\s"'<>]*""".toRegex().find(pageText)?.value
-                    if (anyMp4 != null) {
-                        callback(newLinkQuick(name, "$name (MP4)", anyMp4, cleanedDecoded, Qualities.Unknown.value, ExtractorLinkType.VIDEO))
-                        return true
-                    }
+                    return true
+                } catch (e: Exception) {
+                    android.util.Log.e("An1me_Video", "Error parsing M3U8: ${e.message}")
+                    return false
                 }
-
-                // nothing found in iframe
-                return false
             }
 
+            // Handle direct MP4
+            if (decodedUrl.contains(".mp4", true)) {
+                android.util.Log.d("An1me_Video", "Detected direct MP4 video — playing directly")
+                callback(
+                    createLink(
+                        sourceName = name,
+                        linkName = "$name (MP4)",
+                        url = decodedUrl,
+                        referer = data,
+                        quality = Qualities.Unknown.value,
+                        type = ExtractorLinkType.VIDEO
+                    )
+                )
+                return true
+            }
+
+            android.util.Log.d("An1me_Video", "No valid video link found.")
             return false
+
         } catch (e: Exception) {
-            android.util.Log.e("An1me_Video", "Error: ${e.message}", e)
+            android.util.Log.e("An1me_Video", "Error loading links: ${e.message}", e)
             return false
         }
     }
