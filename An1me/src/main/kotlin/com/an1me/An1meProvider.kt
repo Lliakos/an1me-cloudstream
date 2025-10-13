@@ -148,7 +148,7 @@ class An1meProvider : MainAPI() {
             this.plot = description ?: anilistData?.description
             this.tags = anilistData?.genres
             this.rating = anilistData?.score
-            this.trailerUrl = anilistData?.trailer
+            this.trailer = anilistData?.trailer
             addEpisodes(DubStatus.Subbed, episodes)
         }
 
