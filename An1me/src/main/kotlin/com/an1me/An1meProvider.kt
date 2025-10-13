@@ -148,7 +148,7 @@ class An1meProvider : MainAPI() {
             this.plot = description ?: anilistData?.description
             this.tags = anilistData?.genres
             this.rating = anilistData?.score
-            this.trailer = anilistData?.trailer
+            // trailer removed – not supported in this Cloudstream version
             addEpisodes(DubStatus.Subbed, episodes)
         }
 
