@@ -1,7 +1,3 @@
-// git add --all
-// git commit -m "update: fetch MAL/AniList covers and AniList banners/credits"
-// git push origin master
-
 package com.an1me
 
 import com.lagradost.cloudstream3.*
@@ -9,10 +5,8 @@ import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.Document
 import org.json.JSONObject
-import org.json.JSONArray
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
-import java.net.URLEncoder
 
 @Suppress("DEPRECATION")
 class An1meProvider : MainAPI() {
@@ -24,9 +18,6 @@ class An1meProvider : MainAPI() {
 
     // AniList in-memory cache (case-insensitive keys)
     private val aniListCache = ConcurrentHashMap<String, JSONObject>()
-
-    // MAL (Jikan) cache for covers (case-insensitive keys)
-    private val malCoverCache = ConcurrentHashMap<String, String?>()
 
     // ---------------- Helpers ----------------
 
@@ -49,22 +40,21 @@ class An1meProvider : MainAPI() {
         return meta?.attr("content")?.takeIf { it.isNotBlank() }
     }
 
-    // Clean title to increase AniList/MAL match success (strip parentheses, punctuation, extra whitespace)
+    // Clean title to increase AniList match success
     private fun cleanTitleForAniList(raw: String?): String? {
         if (raw.isNullOrBlank()) return null
         return raw
-            .replace(Regex("\\(.*?\\)"), "") // remove anything in parentheses
-            .replace(Regex("\\[.*?]"), "") // remove brackets
-            .replace(Regex("[^\\p{L}\\p{N}\\s:]"), " ") // keep letters, numbers, spaces, colon
+            .replace(Regex("\\(.*?\\)"), "")
+            .replace(Regex("\\[.*?]"), "")
+            .replace(Regex("[^\\p{L}\\p{N}\\s:]"), " ")
             .replace(Regex("\\s+"), " ")
             .trim()
     }
 
-    // Fetch AniList (with caching). Uses JSON body and headers correctly.
+    // Fetch AniList data
     private suspend fun fetchAniListByTitle(title: String): JSONObject? {
         val key = title.trim().lowercase()
-        aniListCache[key]?.let { return it } // cached
-
+        aniListCache[key]?.let { return it }
         try {
             val query = """
                 query (${"$"}search: String) {
@@ -77,16 +67,13 @@ class An1meProvider : MainAPI() {
                     meanScore
                     episodes
                     description(asHtml: false)
-                    characters(page: 1, perPage: 20) {
+                    characters(page: 1, perPage: 12) {
                       edges {
                         role
                         node { name { full } }
-                        voiceActors {
-                          name { full }
-                        }
                       }
                     }
-                    staff(page: 1, perPage: 20) {
+                    staff(page: 1, perPage: 10) {
                       edges {
                         role
                         node { name { full } }
@@ -107,9 +94,7 @@ class An1meProvider : MainAPI() {
             ).text
 
             val media = JSONObject(res).optJSONObject("data")?.optJSONObject("Media")
-            if (media != null) {
-                aniListCache[key] = media
-            }
+            if (media != null) aniListCache[key] = media
             return media
         } catch (e: Exception) {
             android.util.Log.e("An1me_AniList", "AniList fetch failed: ${e.message}", e)
@@ -117,45 +102,6 @@ class An1meProvider : MainAPI() {
         }
     }
 
-    // Fetch MAL cover image using Jikan v4 public API. Returns image URL or null. Caches results.
-    private suspend fun fetchMalCoverByTitle(title: String): String? {
-        val key = title.trim().lowercase()
-        if (malCoverCache.containsKey(key)) return malCoverCache[key]
-
-        try {
-            val encoded = URLEncoder.encode(title, "UTF-8")
-            val url = "https://api.jikan.moe/v4/anime?q=$encoded&limit=1"
-            val resText = app.get(url).text
-            val resJson = JSONObject(resText)
-            val dataArr = resJson.optJSONArray("data")
-            val img = if (dataArr != null && dataArr.length() > 0) {
-                val first = dataArr.getJSONObject(0)
-                // Try different image fields depending on API response shape
-                val images = first.optJSONObject("images")
-                var imageUrl: String? = null
-                images?.let {
-                    // Jikan v4: images.jpg.large_image_url or images.jpg.image_url
-                    val jpg = it.optJSONObject("jpg")
-                    imageUrl = jpg?.optString("large_image_url", null)
-                    if (imageUrl.isNullOrBlank()) imageUrl = jpg?.optString("image_url", null)
-                }
-                // Fallback to "images" root image if present
-                if (imageUrl.isNullOrBlank()) {
-                    imageUrl = first.optString("image_url", null)
-                }
-                imageUrl
-            } else null
-
-            malCoverCache[key] = img
-            return img
-        } catch (e: Exception) {
-            android.util.Log.e("An1me_MAL", "MAL fetch failed: ${e.message}", e)
-            malCoverCache[key] = null
-            return null
-        }
-    }
-
-    // Create ExtractorLink with referer and quality set
     private suspend fun createLink(
         sourceName: String,
         linkName: String,
@@ -164,43 +110,10 @@ class An1meProvider : MainAPI() {
         quality: Int,
         type: ExtractorLinkType = ExtractorLinkType.M3U8
     ): ExtractorLink {
-        return newExtractorLink(
-            source = sourceName,
-            name = linkName,
-            url = url,
-            type = type
-        ) {
+        return newExtractorLink(source = sourceName, name = linkName, url = url, type = type) {
             this.referer = referer
             this.quality = quality
         }
-    }
-
-    // Determine a good poster image for a given title (prefer page poster, then AniList cover, then MAL)
-    private suspend fun resolveBestCoverFor(title: String?, pagePoster: String?): String? {
-        // If page poster already exists and seems valid, return it
-        if (!pagePoster.isNullOrBlank()) return pagePoster
-
-        val t = title ?: return null
-        val cleaned = cleanTitleForAniList(t) ?: t
-
-        // Try AniList first
-        try {
-            val ani = fetchAniListByTitle(cleaned)
-            ani?.optJSONObject("coverImage")?.optString("large")?.takeIf { it.isNotBlank() }?.let { return it }
-            ani?.optJSONObject("coverImage")?.optString("medium")?.takeIf { it.isNotBlank() }?.let { return it }
-        } catch (e: Exception) {
-            // ignore
-        }
-
-        // Fallback to MyAnimeList via Jikan
-        try {
-            val mal = fetchMalCoverByTitle(cleaned)
-            if (!mal.isNullOrBlank()) return mal
-        } catch (e: Exception) {
-            // ignore
-        }
-
-        return null
     }
 
     // ---------------- Card helpers ----------------
@@ -209,13 +122,14 @@ class An1meProvider : MainAPI() {
         val link = this.selectFirst("a[href*='/anime/']") ?: return null
         val href = fixUrl(link.attr("href"))
         if (href.contains("/watch/")) return null
-
-        // Prioritize English title only
         val en = this.selectFirst("span[data-en-title]")?.text()?.takeIf { it.isNotBlank() }
         val other = this.selectFirst("span[data-nt-title]")?.text()
         val titleFinal = en ?: other ?: link.attr("title") ?: this.selectFirst("img")?.attr("alt") ?: return null
 
+        // Default MAL fallback if poster missing
         val posterUrl = fixUrlNull(this.selectFirst("img")?.resolveImageUrl())
+            ?: "https://img.anilist.co/user/avatar/large/default.png"
+
         return newAnimeSearchResponse(titleFinal, href, TvType.Anime) {
             this.posterUrl = posterUrl
         }
@@ -228,6 +142,7 @@ class An1meProvider : MainAPI() {
         val other = this.selectFirst("span[data-nt-title]")?.text()
         val titleFinal = en ?: other ?: return null
         val posterUrl = fixUrlNull(this.selectFirst("img")?.resolveImageUrl())
+            ?: "https://img.anilist.co/user/avatar/large/default.png"
         return newAnimeSearchResponse(titleFinal, href, TvType.Anime) {
             this.posterUrl = posterUrl
         }
@@ -240,6 +155,7 @@ class An1meProvider : MainAPI() {
         val other = this.selectFirst("span[data-nt-title]")?.text()
         val titleFinal = en ?: other ?: return null
         val posterUrl = fixUrlNull(this.selectFirst("img")?.resolveImageUrl())
+            ?: "https://img.anilist.co/user/avatar/large/default.png"
         return newAnimeSearchResponse(titleFinal, href, TvType.Anime) {
             this.posterUrl = posterUrl
         }
@@ -251,68 +167,27 @@ class An1meProvider : MainAPI() {
         val document = app.get(mainUrl).document
         val homePages = mutableListOf<HomePageList>()
 
-        // Trending -> normal cards (not wide)
         try {
             val trendingItems = document.select(".swiper-trending .swiper-slide").mapNotNull { it.toTrendingResult() }
-            if (trendingItems.isNotEmpty()) {
-                homePages.add(HomePageList("Τάσεις", trendingItems, isHorizontalImages = false))
-            }
+            if (trendingItems.isNotEmpty()) homePages.add(HomePageList("Τάσεις", trendingItems))
         } catch (e: Exception) {
             android.util.Log.e("An1me_MainPage", "Error parsing trending: ${e.message}")
         }
 
-        // Latest Episodes
         try {
             val latestEpisodesSection = document.selectFirst("section:has(h2:contains(Καινούργια Επεισόδια))")
-            val latestEpisodeItems = latestEpisodesSection?.select(".kira-grid-listing > div")?.mapNotNull { it.toLatestEpisodeResult() } ?: emptyList()
-            if (latestEpisodeItems.isNotEmpty()) {
-                homePages.add(HomePageList("Καινούργια Επεισόδια", latestEpisodeItems))
-            }
+            val latestEpisodeItems =
+                latestEpisodesSection?.select(".kira-grid-listing > div")?.mapNotNull { it.toLatestEpisodeResult() } ?: emptyList()
+            if (latestEpisodeItems.isNotEmpty()) homePages.add(HomePageList("Καινούργια Επεισόδια", latestEpisodeItems))
         } catch (e: Exception) {
             android.util.Log.e("An1me_MainPage", "Error parsing latest episodes: ${e.message}")
         }
 
-        // Latest Anime
         try {
-            val items = document.select("li").mapNotNull { it.toSearchResult() }
-            if (items.isNotEmpty()) {
-                homePages.add(HomePageList("Καινούργια Anime", items))
-            }
+            val latestAnimeItems = document.select("li").mapNotNull { it.toSearchResult() }
+            if (latestAnimeItems.isNotEmpty()) homePages.add(HomePageList("Καινούργια Anime", latestAnimeItems))
         } catch (e: Exception) {
             android.util.Log.e("An1me_MainPage", "Error parsing latest anime: ${e.message}")
-        }
-
-        // ---------------- Poster enrichment ----------------
-        // For every HomePageList item, if posterUrl is null, attempt to fetch AniList/MAL covers async here (suspend)
-        try {
-            for (home in homePages) {
-                for (i in home.items.indices) {
-                    val item = home.items[i]
-                    // Only try to enrich AnimeSearchResponse-like items
-                    try {
-                        // AnimeSearchResponse constructed via newAnimeSearchResponse can be cast to AnimeSearchResponse
-                        if (item is AnimeSearchResponse) {
-                            val current = item.posterUrl
-                            if (current.isNullOrBlank()) {
-                                val resolved = resolveBestCoverFor(item.title, current)
-                                resolved?.let {
-                                    item.posterUrl = fixUrl(it)
-                                }
-                            } else {
-                                // ensure URL is absolute
-                                item.posterUrl = fixUrlNull(current)
-                            }
-                        } else {
-                            // If not the exact type, try reflection-friendly approach via properties (best-effort)
-                            // skip for safety
-                        }
-                    } catch (e: Exception) {
-                        android.util.Log.e("An1me_Enrich", "Error enriching poster for ${item.title}: ${e.message}")
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            android.util.Log.e("An1me_Enrich", "Poster enrichment failed: ${e.message}")
         }
 
         return HomePageResponse(homePages)
@@ -323,35 +198,17 @@ class An1meProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val searchUrl = "$mainUrl/search/?s_keyword=$query"
         val document = app.get(searchUrl).document
-        val results = document.select("#first_load_result > div").mapNotNull { item ->
+        return document.select("#first_load_result > div").mapNotNull { item ->
             val link = item.selectFirst("a[href*='/anime/']") ?: return@mapNotNull null
             val href = fixUrl(link.attr("href"))
             val en = item.selectFirst("span[data-en-title]")?.text()?.takeIf { it.isNotBlank() }
             val other = item.selectFirst("span[data-nt-title]")?.text()
             val titleFinal = en ?: other ?: return@mapNotNull null
             val posterUrl = fixUrlNull(item.selectFirst("img")?.resolveImageUrl())
+                ?: "https://img.anilist.co/user/avatar/large/default.png"
             newAnimeSearchResponse(titleFinal, href, TvType.Anime) { this.posterUrl = posterUrl }
         }
-
-        // Enrich poster results as well (try AniList/MAL)
-        results.forEach { r ->
-            try {
-                if (r is AnimeSearchResponse) {
-                    if (r.posterUrl.isNullOrBlank()) {
-                        val resolved = resolveBestCoverFor(r.title, r.posterUrl)
-                        resolved?.let { r.posterUrl = fixUrl(it) }
-                    } else {
-                        r.posterUrl = fixUrlNull(r.posterUrl)
-                    }
-                }
-            } catch (e: Exception) {
-                android.util.Log.e("An1me_SearchEnrich", "Error enriching search poster: ${e.message}")
-            }
-        }
-
-        return results
     }
-
     // ---------------- Load (anime page) ----------------
 
     override suspend fun load(url: String): LoadResponse {
