@@ -6,6 +6,7 @@ import org.jsoup.nodes.Element
 import org.jsoup.nodes.Document
 import org.json.JSONObject
 import java.util.Base64
+import java.util.concurrent.ConcurrentHashMap
 
 @Suppress("DEPRECATION")
 class An1meProvider : MainAPI() {
@@ -14,6 +15,95 @@ class An1meProvider : MainAPI() {
     override var lang = "gr"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Anime)
+
+    // AniList in-memory cache (case-insensitive keys)
+    private val aniListCache = ConcurrentHashMap<String, JSONObject>()
+
+    // ---------------- Helpers ----------------
+
+    // Resolve lazy-loaded or normal image attributes
+    private fun Element?.resolveImageUrl(): String? {
+        if (this == null) return null
+        val attrs = listOf("src", "data-src", "data-lazy", "data-original", "data-srcset", "data-bg")
+        for (a in attrs) {
+            val v = this.attr(a)
+            if (!v.isNullOrEmpty()) {
+                return v.split(Regex("[,\\s]"))[0].takeIf { it.isNotBlank() }
+            }
+        }
+        return null
+    }
+
+    private fun Document?.ogImage(): String? {
+        if (this == null) return null
+        val meta = this.selectFirst("meta[property=og:image]") ?: this.selectFirst("meta[name=og:image]")
+        return meta?.attr("content")?.takeIf { it.isNotBlank() }
+    }
+
+    // Clean title to increase AniList match success (strip parentheses, punctuation, extra whitespace)
+    private fun cleanTitleForAniList(raw: String?): String? {
+        if (raw.isNullOrBlank()) return null
+        return raw
+            .replace(Regex("\\(.*?\\)"), "") // remove anything in parentheses
+            .replace(Regex("\\[.*?]"), "") // remove brackets
+            .replace(Regex("[^\\p{L}\\p{N}\\s:]"), " ") // keep letters, numbers, spaces, colon
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
+    // Fetch AniList (with caching). Uses JSON body and headers correctly.
+    private suspend fun fetchAniListByTitle(title: String): JSONObject? {
+        val key = title.trim().lowercase()
+        aniListCache[key]?.let { return it } // cached
+
+        try {
+            val query = """
+                query (${"$"}search: String) {
+                  Media(search: ${"$"}search, type: ANIME) {
+                    id
+                    title { romaji english native }
+                    bannerImage
+                    coverImage { large medium }
+                    averageScore
+                    meanScore
+                    episodes
+                    description(asHtml: false)
+                    characters(page: 1, perPage: 12) {
+                      edges {
+                        role
+                        node { name { full } }
+                      }
+                    }
+                    staff(page: 1, perPage: 10) {
+                      edges {
+                        role
+                        node { name { full } }
+                      }
+                    }
+                  }
+                }
+            """.trimIndent()
+
+            val jsonBody = JSONObject()
+                .put("query", query)
+                .put("variables", JSONObject().put("search", title))
+
+            val res = app.post(
+                "https://graphql.anilist.co",
+                json = jsonBody.toString(),
+                headers = mapOf("Content-Type" to "application/json")
+            ).text
+
+            val media = JSONObject(res).optJSONObject("data")?.optJSONObject("Media")
+            if (media != null) {
+                aniListCache[key] = media
+            }
+            return media
+        } catch (e: Exception) {
+            android.util.Log.e("An1me_AniList", "AniList fetch failed: ${e.message}", e)
+            return null
+        }
+    }
 
     private suspend fun createLink(
         sourceName: String,
@@ -34,144 +124,32 @@ class An1meProvider : MainAPI() {
         }
     }
 
-    // Fetch AniList metadata
-    private suspend fun fetchAniListMetadata(titleEnglish: String?, titleRomaji: String?): Map<String, Any?> {
-        val searchTerms = listOfNotNull(titleEnglish, titleRomaji).distinct()
-        if (searchTerms.isEmpty()) return emptyMap()
-        
-        for (searchTerm in searchTerms) {
-            try {
-                val queryJson = JSONObject().apply {
-                    put("query", """
-                        query (${"$"}search: String) {
-                            Media(search: ${"$"}search, type: ANIME) {
-                                id
-                                title { english romaji native }
-                                bannerImage
-                                coverImage { extraLarge large }
-                                averageScore
-                                meanScore
-                                characters(page: 1, perPage: 6, sort: FAVOURITES_DESC) {
-                                    edges {
-                                        role
-                                        node { name { full } }
-                                    }
-                                }
-                            }
-                        }
-                    """.trimIndent())
-                    put("variables", JSONObject().put("search", searchTerm))
-                }
-
-                val response = app.post(
-                    "https://graphql.anilist.co",
-                    requestBody = queryJson.toString(),
-                    headers = mapOf("Content-Type" to "application/json")
-                )
-                
-                val json = JSONObject(response.text)
-                val media = json.optJSONObject("data")?.optJSONObject("Media")
-                
-                if (media != null) {
-                    android.util.Log.d("An1me_AniList", "Found metadata for: $searchTerm")
-                    
-                    val banner = media.optString("bannerImage").takeIf { it.isNotBlank() }
-                    val coverObj = media.optJSONObject("coverImage")
-                    val cover = coverObj?.optString("extraLarge")?.takeIf { it.isNotBlank() }
-                        ?: coverObj?.optString("large")?.takeIf { it.isNotBlank() }
-                    
-                    val avgScore = media.optInt("averageScore", -1).takeIf { it > 0 }
-                    val meanScore = media.optInt("meanScore", -1).takeIf { it > 0 }
-                    
-                    val chars = mutableListOf<String>()
-                    val charsObj = media.optJSONObject("characters")?.optJSONArray("edges")
-                    if (charsObj != null) {
-                        for (i in 0 until charsObj.length()) {
-                            val edge = charsObj.optJSONObject(i) ?: continue
-                            val name = edge.optJSONObject("node")?.optJSONObject("name")?.optString("full")
-                            val role = edge.optString("role", "")
-                            if (!name.isNullOrBlank()) {
-                                chars.add("$name ($role)")
-                            }
-                        }
-                    }
-                    
-                    return mapOf(
-                        "banner" to banner,
-                        "cover" to cover,
-                        "averageScore" to avgScore,
-                        "meanScore" to meanScore,
-                        "characters" to chars
-                    )
-                }
-            } catch (e: Exception) {
-                android.util.Log.e("An1me_AniList", "Error for '$searchTerm': ${e.message}")
-            }
-        }
-        
-        return emptyMap()
-    }
-
-    // Helper to get nonce for AJAX requests
-    private suspend fun getNonce(): String? {
-        return try {
-            val response = app.get("$mainUrl/wp-admin/admin-ajax.php?action=get_nonce").text
-            val json = JSONObject(response)
-            json.optString("nonce").takeIf { it.isNotBlank() }
-        } catch (e: Exception) {
-            android.util.Log.e("An1me_Nonce", "Failed to get nonce: ${e.message}")
-            null
-        }
-    }
+    // ---------------- Card helpers ----------------
 
     private fun Element.toSearchResult(): AnimeSearchResponse? {
         val link = this.selectFirst("a[href*='/anime/']") ?: return null
         val href = fixUrl(link.attr("href"))
         if (href.contains("/watch/")) return null
 
-        // Only use Japanese/Romaji title
-        val title = this.selectFirst("span[data-nt-title]")?.text()
-            ?: this.selectFirst("span[data-en-title]")?.text()
-            ?: link.attr("title")
-            ?: this.selectFirst("img")?.attr("alt")
-            ?: return null
+        // Prioritize English title only
+        val en = this.selectFirst("span[data-en-title]")?.text()?.takeIf { it.isNotBlank() }
+        val other = this.selectFirst("span[data-nt-title]")?.text()
+        val titleFinal = en ?: other ?: link.attr("title") ?: this.selectFirst("img")?.attr("alt") ?: return null
 
-        val posterUrl = fixUrlNull(this.selectFirst("img")?.attr("src"))
-
-        return newAnimeSearchResponse(title, href, TvType.Anime) {
+        val posterUrl = fixUrlNull(this.selectFirst("img")?.resolveImageUrl())
+        return newAnimeSearchResponse(titleFinal, href, TvType.Anime) {
             this.posterUrl = posterUrl
-        }
-    }
-
-    private fun Element.toSpotlightResult(): AnimeSearchResponse? {
-        val link = this.selectFirst("a[href*='/anime/']") ?: return null
-        val href = fixUrl(link.attr("href"))
-
-        // Only Japanese title
-        val title = this.selectFirst("span[data-nt-title]")?.text()
-            ?: this.selectFirst("span[data-en-title]")?.text()
-            ?: return null
-
-        // Get banner image for spotlight
-        val bannerUrl = this.selectFirst("img[src*='anilist.co/file/anilistcdn/media/anime/banner']")?.attr("src")
-            ?: this.selectFirst("img")?.attr("src")
-
-        return newAnimeSearchResponse(title, href, TvType.Anime) {
-            this.posterUrl = fixUrlNull(bannerUrl)
         }
     }
 
     private fun Element.toTrendingResult(): AnimeSearchResponse? {
         val link = this.selectFirst("a[href*='/anime/']") ?: return null
         val href = fixUrl(link.attr("href"))
-
-        val title = this.selectFirst("span[data-nt-title]")?.text()
-            ?: this.selectFirst("span[data-en-title]")?.text()
-            ?: return null
-
-        val posterUrl = fixUrlNull(this.selectFirst("img")?.attr("src"))
-
-        return newAnimeSearchResponse(title, href, TvType.Anime) {
+        val en = this.selectFirst("span[data-en-title]")?.text()?.takeIf { it.isNotBlank() }
+        val other = this.selectFirst("span[data-nt-title]")?.text()
+        val titleFinal = en ?: other ?: return null
+        val posterUrl = fixUrlNull(this.selectFirst("img")?.resolveImageUrl())
+        return newAnimeSearchResponse(titleFinal, href, TvType.Anime) {
             this.posterUrl = posterUrl
         }
     }
@@ -179,52 +157,35 @@ class An1meProvider : MainAPI() {
     private fun Element.toLatestEpisodeResult(): AnimeSearchResponse? {
         val link = this.selectFirst("a[href*='/anime/']") ?: return null
         val href = fixUrl(link.attr("href"))
-
-        val title = this.selectFirst("span[data-nt-title]")?.text()
-            ?: this.selectFirst("span[data-en-title]")?.text()
-            ?: return null
-
-        val posterUrl = fixUrlNull(this.selectFirst("img")?.attr("src"))
-
-        return newAnimeSearchResponse(title, href, TvType.Anime) {
+        val en = this.selectFirst("span[data-en-title]")?.text()?.takeIf { it.isNotBlank() }
+        val other = this.selectFirst("span[data-nt-title]")?.text()
+        val titleFinal = en ?: other ?: return null
+        val posterUrl = fixUrlNull(this.selectFirst("img")?.resolveImageUrl())
+        return newAnimeSearchResponse(titleFinal, href, TvType.Anime) {
             this.posterUrl = posterUrl
         }
     }
+
+    // ---------------- Main page ----------------
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val document = app.get(mainUrl).document
         val homePages = mutableListOf<HomePageList>()
 
-        // Spotlight Section (big banners at top)
+        // Trending -> normal cards (not wide)
         try {
-            val spotlightItems = document.select(".swiper-spotlight .swiper-slide").mapNotNull { 
-                it.toSpotlightResult() 
-            }
-            if (spotlightItems.isNotEmpty()) {
-                homePages.add(HomePageList("Spotlight", spotlightItems, isHorizontalImages = true))
-            }
-        } catch (e: Exception) {
-            android.util.Log.e("An1me_MainPage", "Error parsing spotlight: ${e.message}")
-        }
-
-        // Trending Section
-        try {
-            val trendingItems = document.select(".swiper-trending .swiper-slide").mapNotNull { 
-                it.toTrendingResult() 
-            }
+            val trendingItems = document.select(".swiper-trending .swiper-slide").mapNotNull { it.toTrendingResult() }
             if (trendingItems.isNotEmpty()) {
-                homePages.add(HomePageList("Τάσεις", trendingItems))
+                homePages.add(HomePageList("Τάσεις", trendingItems, isHorizontalImages = false))
             }
         } catch (e: Exception) {
             android.util.Log.e("An1me_MainPage", "Error parsing trending: ${e.message}")
         }
 
-        // Latest Episodes Section
+        // Latest Episodes
         try {
             val latestEpisodesSection = document.selectFirst("section:has(h2:contains(Καινούργια Επεισόδια))")
-            val latestEpisodeItems = latestEpisodesSection?.select(".kira-grid-listing > div")?.mapNotNull { 
-                it.toLatestEpisodeResult() 
-            } ?: emptyList()
+            val latestEpisodeItems = latestEpisodesSection?.select(".kira-grid-listing > div")?.mapNotNull { it.toLatestEpisodeResult() } ?: emptyList()
             if (latestEpisodeItems.isNotEmpty()) {
                 homePages.add(HomePageList("Καινούργια Επεισόδια", latestEpisodeItems))
             }
@@ -232,7 +193,7 @@ class An1meProvider : MainAPI() {
             android.util.Log.e("An1me_MainPage", "Error parsing latest episodes: ${e.message}")
         }
 
-        // Latest Anime Section
+        // Latest Anime
         try {
             val items = document.select("li").mapNotNull { it.toSearchResult() }
             if (items.isNotEmpty()) {
@@ -245,188 +206,175 @@ class An1meProvider : MainAPI() {
         return HomePageResponse(homePages)
     }
 
+    // ---------------- Search ----------------
+
     override suspend fun search(query: String): List<SearchResponse> {
         val searchUrl = "$mainUrl/search/?s_keyword=$query"
         val document = app.get(searchUrl).document
-
         return document.select("#first_load_result > div").mapNotNull { item ->
             val link = item.selectFirst("a[href*='/anime/']") ?: return@mapNotNull null
             val href = fixUrl(link.attr("href"))
-
-            val title = item.selectFirst("span[data-nt-title]")?.text()
-                ?: item.selectFirst("span[data-en-title]")?.text()
-                ?: return@mapNotNull null
-
-            val posterUrl = fixUrlNull(item.selectFirst("img")?.attr("src"))
-
-            newAnimeSearchResponse(title, href, TvType.Anime) {
-                this.posterUrl = posterUrl
-            }
+            val en = item.selectFirst("span[data-en-title]")?.text()?.takeIf { it.isNotBlank() }
+            val other = item.selectFirst("span[data-nt-title]")?.text()
+            val titleFinal = en ?: other ?: return@mapNotNull null
+            val posterUrl = fixUrlNull(item.selectFirst("img")?.resolveImageUrl())
+            newAnimeSearchResponse(titleFinal, href, TvType.Anime) { this.posterUrl = posterUrl }
         }
     }
+
+    // ---------------- Load (anime page) ----------------
 
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
 
-        // Get both titles
-        val titleEnglish = document.selectFirst("span[data-en-title]")?.text()
-        val titleRomaji = document.selectFirst("span[data-nt-title]")?.text()
-        
-        // Use Japanese/Romaji as main title
-        val title = titleRomaji ?: titleEnglish ?: document.selectFirst("h1")?.text() ?: "Unknown"
+        // Titles: prefer explicit English data attributes
+        val enTitle = document.selectFirst("span[data-en-title]")?.text()?.takeIf { it.isNotBlank() }
+        val ntTitle = document.selectFirst("span[data-nt-title]")?.text()
+        val title = enTitle ?: ntTitle ?: document.selectFirst("h1.entry-title, h1")?.text() ?: "Unknown"
 
-        android.util.Log.d("An1me_Load", "Loading: $title (EN: $titleEnglish, JP: $titleRomaji)")
+        // Poster resolution and fallback to og:image
+        val poster = fixUrlNull(
+            document.selectFirst(".entry-thumb img")?.resolveImageUrl()
+                ?: document.selectFirst(".anime-thumb img")?.resolveImageUrl()
+                ?: document.selectFirst("img")?.resolveImageUrl()
+                ?: document.ogImage()
+        )
 
-        // Get poster from MAL (site image)
-        val poster = fixUrlNull(document.selectFirst("img")?.attr("src"))
-        
         val description = document.selectFirst("div[data-synopsis]")?.text()
+        var bannerUrl = document.selectFirst("img[src*='anilistcdn/media/anime/banner']")?.attr("src") ?: poster
         val tags = document.select("li:has(span:containsOwn(Είδος:)) a[href*='/genre/']").map { it.text().trim() }
 
-        // Site metadata
-        val siteMalScore = document.selectFirst("li:has(span:contains(MAL Βαθμολογια:))")?.text()?.substringAfter(":")?.trim()
-        val siteStatus = document.selectFirst("li:has(span:contains(Κατάσταση:)) a")?.text()
-        val siteEpisodeCount = document.selectFirst("li:has(span:contains(Επεισόδια:))")?.text()?.substringAfter(":")?.trim()
-        val siteDuration = document.selectFirst("li:has(span:contains(Διάρκεια:))")?.text()?.substringAfter(":")?.trim()
-        val siteStudio = document.selectFirst("li:has(span:contains(Στούντιο:)) a")?.text()
+        // AniList enrichment: clean English-first title for lookup
+        val lookupTitle = cleanTitleForAniList(enTitle ?: ntTitle ?: title) ?: cleanTitleForAniList(title)
+        val anilist = lookupTitle?.let { fetchAniListByTitle(it) }
 
-        // Fetch AniList metadata
-        val anilistData = try {
-            fetchAniListMetadata(titleEnglish, titleRomaji)
-        } catch (e: Exception) {
-            android.util.Log.e("An1me_AniList", "Failed to fetch: ${e.message}")
-            emptyMap()
+        // Use AniList banner if present
+        anilist?.optString("bannerImage", null)?.let { b ->
+            if (b.isNotBlank()) bannerUrl = b
         }
 
-        // Get banner from AniList
-        val bannerUrl = fixUrlNull(anilistData["banner"] as? String)
-        val coverUrl = fixUrlNull(anilistData["cover"] as? String)
-        
-        val finalPoster = coverUrl ?: poster
-        val finalBanner = bannerUrl ?: finalPoster
+        // Extract AniList score, characters, staff
+        val avgScore = anilist?.optInt("averageScore", -1)?.takeIf { it > 0 }
+        val charactersArr = anilist?.optJSONObject("characters")?.optJSONArray("edges")
+        val staffArr = anilist?.optJSONObject("staff")?.optJSONArray("edges")
+        val charList = mutableListOf<String>()
+        val staffList = mutableListOf<String>()
+        charactersArr?.let {
+            for (i in 0 until it.length()) {
+                val edge = it.getJSONObject(i)
+                val name = edge.optJSONObject("node")?.optJSONObject("name")?.optString("full")
+                val role = edge.optString("role")
+                if (!name.isNullOrBlank()) charList.add("$name ($role)")
+            }
+        }
+        staffArr?.let {
+            for (i in 0 until it.length()) {
+                val edge = it.getJSONObject(i)
+                val name = edge.optJSONObject("node")?.optJSONObject("name")?.optString("full")
+                val role = edge.optString("role")
+                if (!name.isNullOrBlank()) staffList.add("$name ($role)")
+            }
+        }
 
-        val aniScore = anilistData["averageScore"] ?: anilistData["meanScore"]
-        val finalScore = aniScore ?: siteMalScore
-        
-        @Suppress("UNCHECKED_CAST")
-        val characters = anilistData["characters"] as? List<String>
-
-        // Enhanced description
+        // Build enhanced description (include AniList score & top characters/staff)
         val enhancedDescription = buildString {
             description?.let { append(it).append("\n\n") }
+            avgScore?.let { append("⭐ AniList Score: $it\n") }
+            if (charList.isNotEmpty()) append("👥 Characters: ${charList.take(6).joinToString(", ")}\n")
+            if (staffList.isNotEmpty()) append("🎨 Staff: ${staffList.take(4).joinToString(", ")}\n")
             append("━━━━━━━━━━━━━━━━\n")
-            
-            if (finalScore != null) {
-                val scoreStr = when (finalScore) {
-                    is Int -> "$finalScore/100"
-                    else -> finalScore.toString()
-                }
-                append("⭐ Score: $scoreStr\n")
-            }
-            
-            siteStatus?.let { append("📺 Status: $it\n") }
-            siteEpisodeCount?.let { append("🎬 Episodes: $it\n") }
-            siteDuration?.let { append("⏱️ Duration: $it\n") }
-            siteStudio?.let { append("🎨 Studio: $it\n") }
-            
-            if (!characters.isNullOrEmpty()) {
-                append("\n👥 Characters:\n")
-                characters.take(6).forEach { append("   • $it\n") }
-            }
+            append("Source: $name\n")
         }
 
-        // Get anime ID from URL for AJAX request
-        val animeId = url.substringAfterLast("/anime/").substringBefore("/").substringBefore("?")
-        
-        // Collect episodes using AJAX
+        // ---------------- Episodes extraction ----------------
+        // Collect all /watch/ links on the page and try additional page variants to fetch more episodes
         val episodes = mutableListOf<Episode>()
-        
-        try {
-            // Get nonce first
-            val nonce = getNonce()
-            
-            if (nonce != null) {
-                android.util.Log.d("An1me_Episodes", "Got nonce: $nonce")
-                
-                // Make AJAX request for episodes
-                val ajaxUrl = "$mainUrl/wp-admin/admin-ajax.php"
-                val formData = mapOf(
-                    "action" to "get_episodes",
-                    "anime_id" to animeId,
-                    "nonce" to nonce
-                )
-                
+        val seen = mutableSetOf<String>()
+
+        // Helper to collect from a Document
+        fun collectEpisodesFromDoc(doc: Document) {
+            doc.select("a[href*='/watch/']").forEach { ep ->
                 try {
-                    val episodesResponse = app.post(
-                        ajaxUrl,
-                        data = formData,
-                        headers = mapOf(
-                            "X-Requested-With" to "XMLHttpRequest"
-                        )
-                    ).text
-                    
-                    val episodesJson = JSONObject(episodesResponse)
-                    val episodesArray = episodesJson.optJSONArray("episodes")
-                    
-                    if (episodesArray != null) {
-                        for (i in 0 until episodesArray.length()) {
-                            val ep = episodesArray.getJSONObject(i)
-                            val epNumber = ep.optInt("number", i + 1)
-                            val epUrl = fixUrl(ep.optString("url", ""))
-                            val epTitle = ep.optString("title", "Episode $epNumber")
-                            
-                            if (epUrl.isNotEmpty()) {
-                                episodes.add(newEpisode(epUrl) {
-                                    this.name = epTitle
-                                    this.episode = epNumber
-                                    this.posterUrl = finalPoster
-                                })
-                            }
-                        }
-                        android.util.Log.d("An1me_Episodes", "Loaded ${episodes.size} episodes via AJAX")
-                    }
+                    val raw = ep.attr("href")
+                    val epUrl = fixUrl(raw)
+                    if (epUrl.isBlank() || epUrl.contains("/anime/")) return@forEach
+                    if (!seen.add(epUrl)) return@forEach
+
+                    // Try to determine episode number using several heuristics
+                    val numberCandidates = listOfNotNull(
+                        ep.selectFirst(".episode-list-item-number")?.text(),
+                        ep.selectFirst(".episode-list-item-title")?.text(),
+                        ep.attr("title"),
+                        ep.text(),
+                        ep.attr("data-episode")
+                    ).joinToString(" ")
+
+                    val number = Regex("""(?:Episode|Ep|E)[^\d]*(\d{1,4})""", RegexOption.IGNORE_CASE).find(numberCandidates)?.groupValues?.get(1)?.toIntOrNull()
+                        ?: Regex("""\b(\d{1,4})\b""").find(numberCandidates)?.groupValues?.get(1)?.toIntOrNull()
+                        ?: episodes.size + 1
+
+                    val epTitle = ep.selectFirst(".episode-list-item-title")?.text()?.trim()
+                        ?: ep.attr("title")?.takeIf { it.isNotBlank() } ?: "Episode $number"
+
+                    episodes.add(newEpisode(epUrl) {
+                        this.name = epTitle
+                        this.episode = number
+                        this.posterUrl = poster // use anime poster for every episode
+                    })
                 } catch (e: Exception) {
-                    android.util.Log.e("An1me_Episodes", "AJAX request failed: ${e.message}")
+                    android.util.Log.e("An1me_EpParse", "Error parsing episode: ${e.message}", e)
                 }
             }
-        } catch (e: Exception) {
-            android.util.Log.e("An1me_Episodes", "Error getting nonce: ${e.message}")
         }
 
-        // Fallback: scrape from page if AJAX fails
-        if (episodes.isEmpty()) {
-            android.util.Log.d("An1me_Episodes", "AJAX failed, falling back to page scraping")
-            
-            val episodeListBox = document.selectFirst("div.episode-list-display-box")
-            episodeListBox?.select("a.episode-list-item[href*='/watch/']")?.forEach { ep ->
-                val episodeUrl = fixUrl(ep.attr("href"))
-                if (episodeUrl.isEmpty() || episodeUrl.contains("/anime/")) return@forEach
+        // Collect from main document
+        collectEpisodesFromDoc(document)
 
-                val episodeNumberText = ep.selectFirst(".episode-list-item-number")?.text()
-                val episodeNumber = episodeNumberText?.trim()?.toIntOrNull() ?: episodes.size + 1
+        // If we still have <= 30 episodes, try to fetch additional likely paginated endpoints
+        if (episodes.size <= 30) {
+            val triedUrls = mutableSetOf<String>()
+            val pageVariants = listOf("?page=", "?p=", "?pg=", "/page/")
+            for (p in 2..12) { // try a bunch of pages (2..12)
+                var foundNew = false
+                for (variant in pageVariants) {
+                    // Build candidate URL variants and avoid repeating
+                    val candidate = when {
+                        url.contains("?") && variant.startsWith("?") -> "$url&${variant.removePrefix("?")}$p"
+                        variant.startsWith("?") -> "$url$variant$p"
+                        else -> url.trimEnd('/') + variant + p
+                    }
+                    if (candidate in triedUrls) continue
+                    triedUrls.add(candidate)
 
-                val episodeTitle = ep.selectFirst(".episode-list-item-title")?.text()?.trim() 
-                    ?: "Episode $episodeNumber"
-
-                episodes.add(newEpisode(episodeUrl) {
-                    this.name = episodeTitle
-                    this.episode = episodeNumber
-                    this.posterUrl = finalPoster
-                })
+                    try {
+                        val doc = app.get(candidate).document
+                        val beforeCount = seen.size
+                        collectEpisodesFromDoc(doc)
+                        if (seen.size > beforeCount) {
+                            foundNew = true
+                        }
+                    } catch (e: Exception) {
+                        // ignore failures for particular candidate
+                    }
+                }
+                if (!foundNew) break // no new episodes found on this iteration -> stop
             }
         }
-        
-        episodes.sortBy { it.episode }
-        android.util.Log.d("An1me_Episodes", "Final episode count: ${episodes.size}")
 
-        return newAnimeLoadResponse(title, url, TvType.Anime) {
-            this.posterUrl = finalPoster
-            this.backgroundPosterUrl = finalBanner
+        // Final sort
+        episodes.sortBy { it.episode }
+
+        // ---------------- Return response ----------------
+        return newAnimeLoadResponse(enTitle ?: title, url, TvType.Anime) {
+            this.posterUrl = poster
+            this.backgroundPosterUrl = bannerUrl
             this.plot = enhancedDescription
             this.tags = tags
             addEpisodes(DubStatus.Subbed, episodes)
         }
     }
+
+    // ---------------- loadLinks (original logic preserved) ----------------
 
     override suspend fun loadLinks(
         data: String,
@@ -451,7 +399,7 @@ class An1meProvider : MainAPI() {
 
             // Handle WeTransfer
             if (decodedUrl.contains("wetransfer.com", true) || decodedUrl.contains("collect.wetransfer.com", true)) {
-                android.util.Log.d("An1me_Video", "Detected WeTransfer link")
+                android.util.Log.d("An1me_Video", "Detected WeTransfer link, attempting extraction...")
 
                 try {
                     val iframeHtml = app.get(iframeSrc).text
@@ -470,7 +418,7 @@ class An1meProvider : MainAPI() {
                         ?.groupValues?.get(1)
 
                     if (match == null) {
-                        android.util.Log.d("An1me_Video", "No JSON params found")
+                        android.util.Log.d("An1me_Video", "No JSON params found in WeTransfer iframe")
                         return false
                     }
 
@@ -481,6 +429,8 @@ class An1meProvider : MainAPI() {
                             .replace("\\/", "/")
                             .replace("\\u0026", "&")
                             .replace("\\u003d", "=")
+
+                        android.util.Log.d("An1me_Video", "Found WeTransfer video URL: $videoUrl")
 
                         callback(
                             createLink(
@@ -495,7 +445,7 @@ class An1meProvider : MainAPI() {
                         return true
                     }
                 } catch (e: Exception) {
-                    android.util.Log.e("An1me_Video", "WeTransfer error: ${e.message}")
+                    android.util.Log.e("An1me_Video", "Error parsing WeTransfer iframe: ${e.message}", e)
                     return false
                 }
             }
@@ -503,25 +453,25 @@ class An1meProvider : MainAPI() {
             // Handle Google Photos
             if (decodedUrl.contains("photos.google.com", true)) {
                 try {
-                    android.util.Log.d("An1me_Video", "Detected Google Photos")
+                    android.util.Log.d("An1me_Video", "Detected Google Photos source — extracting all quality variants")
 
                     val photoHtml = app.get(decodedUrl, referer = iframeSrc).text
-                    
+
                     val videoRegex = Regex("""(https:\/\/[^"'\s]+googleusercontent\.com[^"'\s]+)""")
                     val matches = videoRegex.findAll(photoHtml).toList()
-                    
+
                     if (matches.isEmpty()) {
                         android.util.Log.d("An1me_Video", "No googleusercontent links found")
                         return false
                     }
-                    
+
                     val qualityVariants = listOf(
                         Pair("1080p", "=m37") to Qualities.P1080.value,
                         Pair("720p", "=m22") to Qualities.P720.value,
                         Pair("480p", "=m18") to Qualities.P480.value,
                         Pair("360p", "=m18") to Qualities.P360.value
                     )
-                    
+
                     val baseUrl = matches.first().value
                         .replace("\\u003d", "=")
                         .replace("\\u0026", "&")
@@ -529,11 +479,15 @@ class An1meProvider : MainAPI() {
                         .replace("\\", "")
                         .substringBefore("=m")
                         .substringBefore("?")
-                    
+
+                    android.util.Log.d("An1me_Video", "Base Google Photos URL: $baseUrl")
+
                     for ((qualityInfo, qualityValue) in qualityVariants) {
                         val (qualityName, qualityParam) = qualityInfo
                         val qualityUrl = "$baseUrl$qualityParam"
-                        
+
+                        android.util.Log.d("An1me_Video", "Adding $qualityName: $qualityUrl")
+
                         callback(
                             createLink(
                                 sourceName = name,
@@ -546,17 +500,17 @@ class An1meProvider : MainAPI() {
                         )
                     }
                     return true
-                    
+
                 } catch (e: Exception) {
-                    android.util.Log.e("An1me_Video", "Google Photos error: ${e.message}")
+                    android.util.Log.e("An1me_Video", "Error extracting Google Photos video: ${e.message}", e)
                     return false
                 }
             }
 
             // Handle M3U8
             if (decodedUrl.contains(".m3u8", true)) {
-                android.util.Log.d("An1me_Video", "Detected M3U8")
-                
+                android.util.Log.d("An1me_Video", "Detected M3U8 stream — parsing qualities")
+
                 try {
                     val m3u8Response = app.get(decodedUrl).text
                     val lines = m3u8Response.lines()
@@ -566,7 +520,7 @@ class An1meProvider : MainAPI() {
                         if (line.startsWith("#EXT-X-STREAM-INF")) {
                             val height = """RESOLUTION=\d+x(\d+)""".toRegex()
                                 .find(line)?.groupValues?.get(1)?.toIntOrNull()
-                            
+
                             val quality = when (height) {
                                 2160 -> Qualities.P2160.value
                                 1440 -> Qualities.P1440.value
@@ -612,7 +566,7 @@ class An1meProvider : MainAPI() {
                             .replace(" ", "%20")
                             .replace("[", "%5B")
                             .replace("]", "%5D")
-                        
+
                         callback(
                             createLink(
                                 sourceName = name,
@@ -626,14 +580,14 @@ class An1meProvider : MainAPI() {
                     }
                     return true
                 } catch (e: Exception) {
-                    android.util.Log.e("An1me_Video", "M3U8 error: ${e.message}")
+                    android.util.Log.e("An1me_Video", "Error parsing M3U8: ${e.message}")
                     return false
                 }
             }
 
             // Handle direct MP4
             if (decodedUrl.contains(".mp4", true)) {
-                android.util.Log.d("An1me_Video", "Detected MP4")
+                android.util.Log.d("An1me_Video", "Detected direct MP4 video — playing directly")
                 callback(
                     createLink(
                         sourceName = name,
@@ -647,11 +601,11 @@ class An1meProvider : MainAPI() {
                 return true
             }
 
-            android.util.Log.d("An1me_Video", "No valid video link found")
+            android.util.Log.d("An1me_Video", "No valid video link found.")
             return false
 
         } catch (e: Exception) {
-            android.util.Log.e("An1me_Video", "Error loading links: ${e.message}")
+            android.util.Log.e("An1me_Video", "Error loading links: ${e.message}", e)
             return false
         }
     }
