@@ -3,10 +3,9 @@ package com.an1me
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
+import org.jsoup.nodes.Document
 import org.json.JSONObject
 import java.util.Base64
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.RequestBody.Companion.toRequestBody
 
 @Suppress("DEPRECATION")
 class An1meProvider : MainAPI() {
@@ -35,11 +34,11 @@ class An1meProvider : MainAPI() {
         }
     }
 
-    // ✅ FIXED: Proper RequestBody conversion for GraphQL POST
+    // Fetch AniList metadata
     private suspend fun fetchAniListMetadata(titleEnglish: String?, titleRomaji: String?): Map<String, Any?> {
         val searchTerms = listOfNotNull(titleEnglish, titleRomaji).distinct()
         if (searchTerms.isEmpty()) return emptyMap()
-
+        
         for (searchTerm in searchTerms) {
             try {
                 val queryJson = JSONObject().apply {
@@ -64,29 +63,26 @@ class An1meProvider : MainAPI() {
                     put("variables", JSONObject().put("search", searchTerm))
                 }
 
-                val body = queryJson.toString()
-                    .toRequestBody("application/json".toMediaTypeOrNull())
-
                 val response = app.post(
                     "https://graphql.anilist.co",
-                    requestBody = body,
+                    requestBody = queryJson.toString(),
                     headers = mapOf("Content-Type" to "application/json")
                 )
-
+                
                 val json = JSONObject(response.text)
                 val media = json.optJSONObject("data")?.optJSONObject("Media")
-
+                
                 if (media != null) {
                     android.util.Log.d("An1me_AniList", "Found metadata for: $searchTerm")
-
+                    
                     val banner = media.optString("bannerImage").takeIf { it.isNotBlank() }
                     val coverObj = media.optJSONObject("coverImage")
                     val cover = coverObj?.optString("extraLarge")?.takeIf { it.isNotBlank() }
                         ?: coverObj?.optString("large")?.takeIf { it.isNotBlank() }
-
+                    
                     val avgScore = media.optInt("averageScore", -1).takeIf { it > 0 }
                     val meanScore = media.optInt("meanScore", -1).takeIf { it > 0 }
-
+                    
                     val chars = mutableListOf<String>()
                     val charsObj = media.optJSONObject("characters")?.optJSONArray("edges")
                     if (charsObj != null) {
@@ -99,7 +95,7 @@ class An1meProvider : MainAPI() {
                             }
                         }
                     }
-
+                    
                     return mapOf(
                         "banner" to banner,
                         "cover" to cover,
@@ -112,10 +108,9 @@ class An1meProvider : MainAPI() {
                 android.util.Log.e("An1me_AniList", "Error for '$searchTerm': ${e.message}")
             }
         }
-
+        
         return emptyMap()
     }
-
 
     // Helper to get nonce for AJAX requests
     private suspend fun getNonce(): String? {
