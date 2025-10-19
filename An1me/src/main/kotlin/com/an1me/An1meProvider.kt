@@ -160,15 +160,63 @@ class An1meProvider : MainAPI() {
 
     private suspend fun fetchMalEpisodeTitlesByTitle(title: String): Map<Int, String>? {
         val key = title.trim().lowercase()
-        malEpisodesCache[key]?.let { return it }
+        malEpisodesCache[key]?.let { 
+            android.util.Log.d("An1me_MAL", "Returning cached episodes for: $key")
+            return it 
+        }
 
         try {
-            val searchUrl = "https://api.jikan.moe/v4/anime?q=${title.encodeUrl()}&limit=1"
-            val searchRes = app.get(searchUrl).text
-            val searchJson = JSONObject(searchRes)
-            val dataArr = searchJson.optJSONArray("data")
-            val malId = dataArr?.optJSONObject(0)?.optInt("mal_id", -1) ?: -1
+            // Try multiple search variations
+            val searchVariations = listOf(
+                title,
+                title.replace(":", ""),
+                title.split(":").firstOrNull()?.trim() ?: title,
+                title.replace(Regex("\\b(Season|Part|Cour)\\s*\\d+", RegexOption.IGNORE_CASE), "").trim()
+            ).distinct()
+
+            var malId = -1
+            for (searchTitle in searchVariations) {
+                if (searchTitle.isBlank()) continue
+                try {
+                    val searchUrl = "https://api.jikan.moe/v4/anime?q=${searchTitle.encodeUrl()}&limit=3"
+                    android.util.Log.d("An1me_MAL", "Searching MAL with: $searchTitle")
+                    
+                    val searchRes = app.get(searchUrl).text
+                    val searchJson = JSONObject(searchRes)
+                    val dataArr = searchJson.optJSONArray("data")
+                    
+                    if (dataArr != null && dataArr.length() > 0) {
+                        // Try to find best match
+                        for (i in 0 until dataArr.length()) {
+                            val anime = dataArr.getJSONObject(i)
+                            val animeTitle = anime.optString("title", "")
+                            val animeEnglish = anime.optString("title_english", "")
+                            
+                            if (animeTitle.equals(searchTitle, ignoreCase = true) || 
+                                animeEnglish.equals(searchTitle, ignoreCase = true)) {
+                                malId = anime.optInt("mal_id", -1)
+                                android.util.Log.d("An1me_MAL", "Found exact match: $animeTitle (ID: $malId)")
+                                break
+                            }
+                        }
+                        
+                        // If no exact match, use first result
+                        if (malId <= 0) {
+                            malId = dataArr.getJSONObject(0).optInt("mal_id", -1)
+                            val foundTitle = dataArr.getJSONObject(0).optString("title", "")
+                            android.util.Log.d("An1me_MAL", "Using first result: $foundTitle (ID: $malId)")
+                        }
+                    }
+                    
+                    if (malId > 0) break
+                    Thread.sleep(500) // Rate limit protection
+                } catch (e: Exception) {
+                    android.util.Log.e("An1me_MAL", "Search variation failed for '$searchTitle': ${e.message}")
+                }
+            }
+            
             if (malId <= 0) {
+                android.util.Log.w("An1me_MAL", "No MAL ID found for: $title")
                 malEpisodesCache[key] = emptyMap()
                 return emptyMap()
             }
@@ -177,6 +225,8 @@ class An1meProvider : MainAPI() {
 
             val episodesMap = mutableMapOf<Int, String>()
             var page = 1
+            var consecutiveEmptyPages = 0
+            
             loop@ while (true) {
                 val epsUrl = "https://api.jikan.moe/v4/anime/$malId/episodes?page=$page"
                 android.util.Log.d("An1me_MAL", "Fetching page $page: $epsUrl")
@@ -184,35 +234,53 @@ class An1meProvider : MainAPI() {
                 // Add delay to respect rate limits
                 if (page > 1) Thread.sleep(1000)
                 
-                val epsRes = app.get(epsUrl).text
-                val epsJson = JSONObject(epsRes)
-                val epsArr = epsJson.optJSONArray("data") ?: JSONArray()
-                
-                android.util.Log.d("An1me_MAL", "Page $page: ${epsArr.length()} episodes")
-                
-                if (epsArr.length() == 0) break
-                for (i in 0 until epsArr.length()) {
-                    val obj = epsArr.getJSONObject(i)
-                    val epNo = obj.optInt("mal_id")
-                    val epTitle = obj.optString("title").takeIf { it.isNotBlank() } 
-                        ?: obj.optString("title_japanese").takeIf { it.isNotBlank() }
-                    if (epNo > 0 && !epTitle.isNullOrBlank()) {
-                        episodesMap[epNo] = epTitle
-                        android.util.Log.d("An1me_MAL", "Ep $epNo: $epTitle")
+                try {
+                    val epsRes = app.get(epsUrl).text
+                    val epsJson = JSONObject(epsRes)
+                    val epsArr = epsJson.optJSONArray("data") ?: JSONArray()
+                    
+                    android.util.Log.d("An1me_MAL", "Page $page: ${epsArr.length()} episodes")
+                    
+                    if (epsArr.length() == 0) {
+                        consecutiveEmptyPages++
+                        if (consecutiveEmptyPages >= 2) break // Stop after 2 empty pages
+                        page++
+                        continue
                     }
+                    
+                    consecutiveEmptyPages = 0
+                    
+                    for (i in 0 until epsArr.length()) {
+                        val obj = epsArr.getJSONObject(i)
+                        // The episode number is in the "mal_id" field for each episode object
+                        val epNo = obj.optInt("mal_id", -1)
+                        val epTitle = obj.optString("title", "").takeIf { it.isNotBlank() && it != "null" } 
+                            ?: obj.optString("title_japanese", "").takeIf { it.isNotBlank() && it != "null" }
+                        
+                        if (epNo > 0 && !epTitle.isNullOrBlank()) {
+                            episodesMap[epNo] = epTitle
+                            android.util.Log.d("An1me_MAL", "Ep $epNo: $epTitle")
+                        } else if (epNo > 0) {
+                            android.util.Log.d("An1me_MAL", "Ep $epNo has no title (MAL data unavailable)")
+                        }
+                    }
+                    
+                    val pagination = epsJson.optJSONObject("pagination")
+                    val hasNext = pagination?.optBoolean("has_next_page", false) ?: false
+                    if (!hasNext) break@loop
+                    page++
+                    if (page > 100) break // Safety limit
+                } catch (e: Exception) {
+                    android.util.Log.e("An1me_MAL", "Error fetching page $page: ${e.message}", e)
+                    break@loop
                 }
-                val pagination = epsJson.optJSONObject("pagination")
-                val hasNext = pagination?.optBoolean("has_next_page", false) ?: false
-                if (!hasNext) break@loop
-                page += 1
-                if (page > 100) break // Safety limit
             }
 
-            android.util.Log.d("An1me_MAL", "Total episodes fetched: ${episodesMap.size}")
+            android.util.Log.d("An1me_MAL", "Total episodes fetched: ${episodesMap.size} for '$title'")
             malEpisodesCache[key] = episodesMap
             return episodesMap
         } catch (e: Exception) {
-            android.util.Log.e("An1me_MAL", "MAL episodes fetch failed: ${e.message}", e)
+            android.util.Log.e("An1me_MAL", "MAL episodes fetch failed for '$title': ${e.message}", e)
             malEpisodesCache[key] = emptyMap()
             return emptyMap()
         }
@@ -606,9 +674,14 @@ class An1meProvider : MainAPI() {
                             enrichedCount++
                         }
                     }
-                    android.util.Log.d("An1me_EpEnrich", "Enriched $enrichedCount episode names")
+                    android.util.Log.d("An1me_EpEnrich", "Enriched $enrichedCount/${episodes.size} episode names")
+                    
+                    // If very few episodes have titles, it might be a data issue
+                    if (enrichedCount > 0 && enrichedCount < episodes.size * 0.1) {
+                        android.util.Log.w("An1me_EpEnrich", "Only $enrichedCount episodes have titles - MAL may not have complete episode data for this anime")
+                    }
                 } else {
-                    android.util.Log.w("An1me_EpEnrich", "No MAL episode titles found")
+                    android.util.Log.w("An1me_EpEnrich", "No MAL episode titles found - MAL may not have episode data for this anime")
                 }
             } catch (e: Exception) {
                 android.util.Log.e("An1me_EpEnrich", "Error enriching episode names: ${e.message}", e)
