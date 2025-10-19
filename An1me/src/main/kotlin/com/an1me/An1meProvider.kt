@@ -74,11 +74,18 @@ class An1meProvider : MainAPI() {
                     meanScore
                     episodes
                     description(asHtml: false)
-                    characters(page: 1, perPage: 50) {
+                    trailer { id site }
+                    characters(page: 1, perPage: 50, sort: ROLE) {
                       edges {
                         role
-                        node { name { full } }
-                        voiceActors { name { full } }
+                        node { 
+                          name { full }
+                          image { large }
+                        }
+                        voiceActors(language: JAPANESE, sort: RELEVANCE) { 
+                          name { full }
+                          language
+                        }
                       }
                     }
                     staff(page: 1, perPage: 50) {
@@ -97,17 +104,23 @@ class An1meProvider : MainAPI() {
 
             val res = app.post(
                 "https://graphql.anilist.co",
-                data = mapOf("query" to query, "variables" to """{"search":"$title"}"""),
-                headers = mapOf("Content-Type" to "application/json")
+                requestBody = jsonBody.toString(),
+                headers = mapOf(
+                    "Content-Type" to "application/json",
+                    "Accept" to "application/json"
+                )
             ).text
 
             val media = JSONObject(res).optJSONObject("data")?.optJSONObject("Media")
             if (media != null) {
+                android.util.Log.d("An1me_AniList", "Successfully fetched AniList data for: $title")
                 aniListCache[key] = media
+            } else {
+                android.util.Log.w("An1me_AniList", "No media found for: $title")
             }
             return media
         } catch (e: Exception) {
-            android.util.Log.e("An1me_AniList", "AniList fetch failed: ${e.message}", e)
+            android.util.Log.e("An1me_AniList", "AniList fetch failed for '$title': ${e.message}", e)
             return null
         }
     }
@@ -160,28 +173,42 @@ class An1meProvider : MainAPI() {
                 return emptyMap()
             }
 
+            android.util.Log.d("An1me_MAL", "Fetching episodes for MAL ID: $malId")
+
             val episodesMap = mutableMapOf<Int, String>()
             var page = 1
             loop@ while (true) {
                 val epsUrl = "https://api.jikan.moe/v4/anime/$malId/episodes?page=$page"
+                android.util.Log.d("An1me_MAL", "Fetching page $page: $epsUrl")
+                
+                // Add delay to respect rate limits
+                if (page > 1) Thread.sleep(1000)
+                
                 val epsRes = app.get(epsUrl).text
                 val epsJson = JSONObject(epsRes)
                 val epsArr = epsJson.optJSONArray("data") ?: JSONArray()
+                
+                android.util.Log.d("An1me_MAL", "Page $page: ${epsArr.length()} episodes")
+                
                 if (epsArr.length() == 0) break
                 for (i in 0 until epsArr.length()) {
                     val obj = epsArr.getJSONObject(i)
                     val epNo = obj.optInt("mal_id")
                     val epTitle = obj.optString("title").takeIf { it.isNotBlank() } 
                         ?: obj.optString("title_japanese").takeIf { it.isNotBlank() }
-                    if (epNo > 0 && !epTitle.isNullOrBlank()) episodesMap[epNo] = epTitle
+                    if (epNo > 0 && !epTitle.isNullOrBlank()) {
+                        episodesMap[epNo] = epTitle
+                        android.util.Log.d("An1me_MAL", "Ep $epNo: $epTitle")
+                    }
                 }
                 val pagination = epsJson.optJSONObject("pagination")
-                val last = pagination?.optInt("last_visible_page", page) ?: page
-                if (page >= last) break@loop
+                val hasNext = pagination?.optBoolean("has_next_page", false) ?: false
+                if (!hasNext) break@loop
                 page += 1
-                if (page > 50) break
+                if (page > 100) break // Safety limit
             }
 
+            android.util.Log.d("An1me_MAL", "Total episodes fetched: ${episodesMap.size}")
             malEpisodesCache[key] = episodesMap
             return episodesMap
         } catch (e: Exception) {
@@ -423,11 +450,24 @@ class An1meProvider : MainAPI() {
         }
 
         val avgScore = anilist?.optInt("averageScore", -1)?.takeIf { it > 0 }
+        val meanScore = anilist?.optInt("meanScore", -1)?.takeIf { it > 0 }
+        val displayScore = avgScore ?: meanScore
+        
+        // Extract trailer
+        val trailerObj = anilist?.optJSONObject("trailer")
+        val trailerSite = trailerObj?.optString("site")
+        val trailerId = trailerObj?.optString("id")
+        val trailerUrl = if (trailerSite == "youtube" && !trailerId.isNullOrBlank()) {
+            "https://www.youtube.com/watch?v=$trailerId"
+        } else null
+        
         val charactersArr = anilist?.optJSONObject("characters")?.optJSONArray("edges")
         val staffArr = anilist?.optJSONObject("staff")?.optJSONArray("edges")
         val charList = mutableListOf<String>()
         val staffList = mutableListOf<String>()
+        
         charactersArr?.let {
+            android.util.Log.d("An1me_AniList", "Processing ${it.length()} characters")
             for (i in 0 until it.length()) {
                 try {
                     val edge = it.getJSONObject(i)
@@ -438,44 +478,64 @@ class An1meProvider : MainAPI() {
                     if (vaArr != null) {
                         for (j in 0 until vaArr.length()) {
                             val va = vaArr.getJSONObject(j)
-                            va.optJSONObject("name")?.optString("full")?.let { vaNames.add(it) }
+                            val vaName = va.optJSONObject("name")?.optString("full")
+                            val vaLang = va.optString("language")
+                            if (!vaName.isNullOrBlank()) {
+                                vaNames.add(if (vaLang == "Japanese") vaName else "$vaName ($vaLang)")
+                            }
                         }
                     }
                     val vaPart = if (vaNames.isNotEmpty()) " — VA: ${vaNames.joinToString(", ")}" else ""
                     if (!name.isNullOrBlank()) charList.add("$name ($role)$vaPart")
-                } catch (_: Exception) {}
+                } catch (e: Exception) {
+                    android.util.Log.e("An1me_AniList", "Error parsing character $i: ${e.message}", e)
+                }
             }
         }
+        
         staffArr?.let {
+            android.util.Log.d("An1me_AniList", "Processing ${it.length()} staff")
             for (i in 0 until it.length()) {
                 try {
                     val edge = it.getJSONObject(i)
                     val name = edge.optJSONObject("node")?.optJSONObject("name")?.optString("full")
                     val role = edge.optString("role")
                     if (!name.isNullOrBlank()) staffList.add("$name ($role)")
-                } catch (_: Exception) {}
+                } catch (e: Exception) {
+                    android.util.Log.e("An1me_AniList", "Error parsing staff $i: ${e.message}", e)
+                }
             }
         }
 
         val enhancedDescription = buildString {
             siteDescription?.let { append(it).append("\n\n") }
-            avgScore?.let { append("⭐ AniList Score: $it\n") }
-            if (charList.isNotEmpty()) append("👥 Characters: ${charList.take(8).joinToString(", ")}\n")
-            if (staffList.isNotEmpty()) append("🎨 Staff: ${staffList.take(6).joinToString(", ")}\n")
+            displayScore?.let { append("⭐ AniList Score: $it/100\n") }
+            trailerUrl?.let { append("🎬 Trailer: $it\n") }
+            if (charList.isNotEmpty()) {
+                append("👥 Characters:\n")
+                charList.take(10).forEach { append("  • $it\n") }
+            }
+            if (staffList.isNotEmpty()) {
+                append("🎨 Staff:\n")
+                staffList.take(8).forEach { append("  • $it\n") }
+            }
             append("━━━━━━━━━━━━━━━━\n")
             append("Source: $name\n")
         }
 
         // Extract total episode count from the anime page
-        // Looking for "E 26" pattern in .text-spec spans
+        // Looking for links with "E \d+" pattern in the episode list
         val totalEpisodes = try {
-            val episodeSpan = document.select(".text-spec span.inline-block").firstOrNull { 
-                it.text().trim().matches(Regex("""^E\s*\d+$""", RegexOption.IGNORE_CASE))
+            val episodeLinks = document.select("a[href*='/watch/']")
+            val episodeNumbers = episodeLinks.mapNotNull { link ->
+                val text = link.text().trim()
+                if (text.matches(Regex("""^E\s*\d+$""", RegexOption.IGNORE_CASE))) {
+                    text.replace(Regex("""[^\d]"""), "").toIntOrNull()
+                } else null
             }
-            val episodeText = episodeSpan?.text()?.trim()
-            val count = episodeText?.replace(Regex("""[^\d]"""), "")?.toIntOrNull() ?: 0
+            val count = episodeNumbers.maxOrNull() ?: 0
             
-            android.util.Log.d("An1me_EpCount", "Found episode indicator: '$episodeText' -> count: $count")
+            android.util.Log.d("An1me_EpCount", "Found episode count: $count (from ${episodeNumbers.size} episode links)")
             count
         } catch (e: Exception) {
             android.util.Log.e("An1me_EpCount", "Error getting episode count: ${e.message}", e)
@@ -530,18 +590,29 @@ class An1meProvider : MainAPI() {
         episodes.sortBy { it.episode }
 
         // Enrich episode names with MAL titles
-        try {
-            val lookup = lookupTitle ?: cleanTitleForAniList(siteTitle) ?: siteTitle
-            val malEps = fetchMalEpisodeTitlesByTitle(lookup)
-            if (!malEps.isNullOrEmpty()) {
-                for (ep in episodes) {
-                    val n = ep.episode
-                    val malName = malEps[n]
-                    if (!malName.isNullOrBlank()) ep.name = malName
+        if (episodes.isNotEmpty()) {
+            try {
+                val lookup = lookupTitle ?: cleanTitleForAniList(siteTitle) ?: siteTitle
+                android.util.Log.d("An1me_EpEnrich", "Looking up MAL episodes for: $lookup (${episodes.size} episodes)")
+                val malEps = fetchMalEpisodeTitlesByTitle(lookup)
+                if (!malEps.isNullOrEmpty()) {
+                    android.util.Log.d("An1me_EpEnrich", "Found ${malEps.size} episode titles from MAL")
+                    var enrichedCount = 0
+                    for (ep in episodes) {
+                        val n = ep.episode
+                        val malName = malEps[n]
+                        if (!malName.isNullOrBlank()) {
+                            ep.name = "Episode $n: $malName"
+                            enrichedCount++
+                        }
+                    }
+                    android.util.Log.d("An1me_EpEnrich", "Enriched $enrichedCount episode names")
+                } else {
+                    android.util.Log.w("An1me_EpEnrich", "No MAL episode titles found")
                 }
+            } catch (e: Exception) {
+                android.util.Log.e("An1me_EpEnrich", "Error enriching episode names: ${e.message}", e)
             }
-        } catch (e: Exception) {
-            android.util.Log.e("An1me_EpEnrich", "Error enriching episode names: ${e.message}", e)
         }
 
         return newAnimeLoadResponse(siteTitle, url, TvType.Anime) {
