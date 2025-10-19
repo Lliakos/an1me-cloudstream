@@ -693,10 +693,7 @@ class An1meProvider : MainAPI() {
             this.plot = enhancedDescription
             this.tags = tags
             
-            // Add trailer if available
-            if (trailerUrl != null) {
-                addTrailer(trailerUrl)
-            }
+
             
             addEpisodes(DubStatus.Subbed, episodes)
         }
