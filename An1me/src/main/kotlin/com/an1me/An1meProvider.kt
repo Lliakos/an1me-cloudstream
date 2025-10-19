@@ -270,44 +270,26 @@ class An1meProvider : MainAPI() {
                 val siteTitle = card.title
                 val lookupTitle = cleanTitleForAniList(siteTitle) ?: siteTitle
                 val ani = lookupTitle.let { fetchAniListByTitle(it) }
-                if (ani != null) {
-                    // Replace poster and use AniList title (but keep site title in a fallback variable)
-                    val aniTitle = pickAniTitle(ani)
-                    val cover = ani.optJSONObject("coverImage")?.optString("large", null)
-                        ?: ani.optJSONObject("coverImage")?.optString("medium", null)
-                    if (!aniTitle.isNullOrBlank()) {
-                        // Replace display title with AniList title
-                        try {
-                            card.title = aniTitle
-                        } catch (_: Throwable) {
-                            // ignore if immutable in some API versions
-                        }
-                    }
-                    if (!cover.isNullOrBlank()) {
-                        card.posterUrl = fixUrl(cover)
-                    } else {
-                        // MAL fallback for cover
-                        val malCover = fetchMalCoverByTitle(siteTitle)
-                        if (!malCover.isNullOrBlank()) card.posterUrl = fixUrl(malCover)
-                    }
-                    // Attach averageScore to plot field (small, safe) if available
-                    val score = ani.optInt("averageScore", -1).takeIf { it > 0 }
-                    score?.let {
-                        try {
-                            card.plot = "⭐ $it"
-                        } catch (_: Throwable) {
-                            // plot may not exist on some SearchResponse versions; ignore if so
-                        }
-                    }
-                } else {
-                    // If AniList not found, try MAL cover
-                    val malCover = fetchMalCoverByTitle(card.title)
-                    if (!malCover.isNullOrBlank()) card.posterUrl = fixUrl(malCover)
+
+                // Build new response safely (don't mutate original)
+                val aniTitle = pickAniTitle(ani) ?: card.title
+                val cover = ani?.optJSONObject("coverImage")?.optString("large", null)
+                    ?: ani?.optJSONObject("coverImage")?.optString("medium", null)
+                val posterToUse = if (!cover.isNullOrBlank()) fixUrl(cover) else (fetchMalCoverByTitle(siteTitle) ?: card.posterUrl)
+
+                val score = ani?.optInt("averageScore", -1)?.takeIf { it > 0 }
+                val plotSmall = score?.let { "⭐ $it" } ?: card.plot
+
+                val newCard = newAnimeSearchResponse(aniTitle, card.url, TvType.Anime) {
+                    this.posterUrl = posterToUse
+                    // plot may not be a field in some API versions, builder will ignore unknowns
+                    try { this.plot = plotSmall } catch (_: Throwable) {}
                 }
+
+                enriched.add(newCard)
             } catch (e: Exception) {
                 android.util.Log.e("An1me_EnrichCard", "Error enriching card ${card.title}: ${e.message}", e)
-            } finally {
-                enriched.add(card)
+                enriched.add(card) // fallback to original
             }
         }
         return enriched
@@ -353,7 +335,7 @@ class An1meProvider : MainAPI() {
         if (latestEpisodesEnriched.isNotEmpty()) homePages.add(HomePageList("Καινούργια Επεισόδια", latestEpisodesEnriched))
         if (latestAnimeEnriched.isNotEmpty()) homePages.add(HomePageList("Καινούργια Anime", latestAnimeEnriched))
 
-        return newHomePageResponse(homePages)
+        return HomePageResponse(homePages)
     }
 
     // ---------------- Search ----------------
@@ -392,26 +374,21 @@ class An1meProvider : MainAPI() {
                     val siteTitle = r.title
                     val lookup = cleanTitleForAniList(siteTitle) ?: siteTitle
                     val ani = lookup.let { fetchAniListByTitle(it) }
-                    if (ani != null) {
-                        val aniTitle = pickAniTitle(ani)
-                        val cover = ani.optJSONObject("coverImage")?.optString("large", null)
-                            ?: ani.optJSONObject("coverImage")?.optString("medium", null)
-                        if (!aniTitle.isNullOrBlank()) {
-                            try { r.title = aniTitle } catch (_: Throwable) {}
-                        }
-                        if (!cover.isNullOrBlank()) r.posterUrl = fixUrl(cover)
-                        else {
-                            val mal = fetchMalCoverByTitle(siteTitle)
-                            if (!mal.isNullOrBlank()) r.posterUrl = fixUrl(mal)
-                        }
-                    } else {
-                        val mal = fetchMalCoverByTitle(r.title)
-                        if (!mal.isNullOrBlank()) r.posterUrl = fixUrl(mal)
+
+                    val aniTitle = ani?.let { pickAniTitle(it) } ?: r.title
+                    val cover = ani?.optJSONObject("coverImage")?.optString("large", null)
+                        ?: ani?.optJSONObject("coverImage")?.optString("medium", null)
+                    val posterToUse = if (!cover.isNullOrBlank()) fixUrl(cover) else (fetchMalCoverByTitle(siteTitle) ?: r.posterUrl)
+
+                    val newResp = newAnimeSearchResponse(aniTitle, r.url, TvType.Anime) {
+                        this.posterUrl = posterToUse
                     }
+                    enrichedResults.add(newResp)
+                } else {
+                    enrichedResults.add(r)
                 }
             } catch (e: Exception) {
                 android.util.Log.e("An1me_SearchEnrich", "Error enriching search result ${r.title}: ${e.message}", e)
-            } finally {
                 enrichedResults.add(r)
             }
         }
