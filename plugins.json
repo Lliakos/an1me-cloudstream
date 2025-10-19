@@ -14,7 +14,7 @@
             "AnimeMovie",
             "OVA"
         ],
-        "version": 62,
+        "version": 63,
         "internalName": "An1me",
         "description": "Stream anime from An1me.to",
         "url": "https://raw.githubusercontent.com/Lliakos/an1me-cloudstream/builds/An1me.cs3",
