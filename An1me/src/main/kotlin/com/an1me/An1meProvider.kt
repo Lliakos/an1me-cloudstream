@@ -190,8 +190,7 @@ class An1meProvider : MainAPI() {
                 page += 1
                 if (page > 100) break // Safety limit for very long anime
                 
-                // Rate limiting - wait 1 second between requests
-                kotlinx.coroutines.delay(1000)
+                
             }
 
             android.util.Log.d("An1me_MAL", "Total episodes fetched: ${episodesMap.size}")
