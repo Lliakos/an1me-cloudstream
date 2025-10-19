@@ -698,11 +698,6 @@ class An1meProvider : MainAPI() {
             this.plot = enhancedDescription
             this.tags = tags
             
-             // ✅ Safe trailer assignment
-            if (trailerFinal != null) {
-                this.trailerUrl = trailerFinal
-            }
-            
             addEpisodes(DubStatus.Subbed, episodes)
         }
     }
