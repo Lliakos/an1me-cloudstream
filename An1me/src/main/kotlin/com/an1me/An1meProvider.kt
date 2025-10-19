@@ -160,6 +160,8 @@ class An1meProvider : MainAPI() {
                 return emptyMap()
             }
 
+            android.util.Log.d("An1me_MAL", "Found MAL ID: $malId for title: $title")
+
             val episodesMap = mutableMapOf<Int, String>()
             var page = 1
             loop@ while (true) {
@@ -168,20 +170,31 @@ class An1meProvider : MainAPI() {
                 val epsJson = JSONObject(epsRes)
                 val epsArr = epsJson.optJSONArray("data") ?: JSONArray()
                 if (epsArr.length() == 0) break
+                
+                android.util.Log.d("An1me_MAL", "Fetching page $page, found ${epsArr.length()} episodes")
+                
                 for (i in 0 until epsArr.length()) {
                     val obj = epsArr.getJSONObject(i)
+                    // Use mal_id as episode number (this is the actual episode number)
                     val epNo = obj.optInt("mal_id")
                     val epTitle = obj.optString("title").takeIf { it.isNotBlank() } 
                         ?: obj.optString("title_japanese").takeIf { it.isNotBlank() }
-                    if (epNo > 0 && !epTitle.isNullOrBlank()) episodesMap[epNo] = epTitle
+                    if (epNo > 0 && !epTitle.isNullOrBlank()) {
+                        episodesMap[epNo] = epTitle
+                        android.util.Log.d("An1me_MAL", "Episode $epNo: $epTitle")
+                    }
                 }
                 val pagination = epsJson.optJSONObject("pagination")
-                val last = pagination?.optInt("last_visible_page", page) ?: page
-                if (page >= last) break@loop
+                val hasNext = pagination?.optBoolean("has_next_page", false) ?: false
+                if (!hasNext) break@loop
                 page += 1
-                if (page > 50) break
+                if (page > 100) break // Safety limit for very long anime
+                
+                // Rate limiting - wait 1 second between requests
+                kotlinx.coroutines.delay(1000)
             }
 
+            android.util.Log.d("An1me_MAL", "Total episodes fetched: ${episodesMap.size}")
             malEpisodesCache[key] = episodesMap
             return episodesMap
         } catch (e: Exception) {
