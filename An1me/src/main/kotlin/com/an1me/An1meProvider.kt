@@ -104,7 +104,7 @@ class An1meProvider : MainAPI() {
 
             val res = app.post(
                 "https://graphql.anilist.co",
-                requestBody = jsonBody.toString(),
+                data = mapOf("query" to query, "variables" to """{"search":"$title"}"""),
                 headers = mapOf(
                     "Content-Type" to "application/json",
                     "Accept" to "application/json"
