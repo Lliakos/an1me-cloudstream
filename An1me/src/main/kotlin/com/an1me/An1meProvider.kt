@@ -252,21 +252,16 @@ class An1meProvider : MainAPI() {
                     
                     for (i in 0 until epsArr.length()) {
                         val obj = epsArr.getJSONObject(i)
-                        // Try multiple possible field names for episode number
-                        val epNo = obj.optInt("mal_id", -1).takeIf { it > 0 }
-                            ?: obj.optInt("episode", -1).takeIf { it > 0 }
-                            ?: (i + 1 + (page - 1) * 100) // Fallback: calculate from position
-                        
-                        // Try multiple possible field names for episode title
+                        // The episode number is in the "mal_id" field for each episode object
+                        val epNo = obj.optInt("mal_id", -1)
                         val epTitle = obj.optString("title", "").takeIf { it.isNotBlank() && it != "null" } 
                             ?: obj.optString("title_japanese", "").takeIf { it.isNotBlank() && it != "null" }
-                            ?: obj.optString("title_romanji", "").takeIf { it.isNotBlank() && it != "null" }
                         
                         if (epNo > 0 && !epTitle.isNullOrBlank()) {
                             episodesMap[epNo] = epTitle
                             android.util.Log.d("An1me_MAL", "Ep $epNo: $epTitle")
                         } else if (epNo > 0) {
-                            android.util.Log.d("An1me_MAL", "Ep $epNo has no title (fields checked: title='${obj.optString("title")}', title_japanese='${obj.optString("title_japanese")}')")
+                            android.util.Log.d("An1me_MAL", "Ep $epNo has no title (MAL data unavailable)")
                         }
                     }
                     
@@ -530,7 +525,7 @@ class An1meProvider : MainAPI() {
         val trailerObj = anilist?.optJSONObject("trailer")
         val trailerSite = trailerObj?.optString("site")
         val trailerId = trailerObj?.optString("id")
-        val trailerFinal = if (trailerSite == "youtube" && !trailerId.isNullOrBlank()) {
+        val trailerUrl = if (trailerSite == "youtube" && !trailerId.isNullOrBlank()) {
             "https://www.youtube.com/watch?v=$trailerId"
         } else null
         
@@ -697,6 +692,11 @@ class An1meProvider : MainAPI() {
             this.backgroundPosterUrl = bannerUrl
             this.plot = enhancedDescription
             this.tags = tags
+            
+            // Add trailer if available
+            if (trailerUrl != null) {
+                addTrailer(trailerUrl)
+            }
             
             addEpisodes(DubStatus.Subbed, episodes)
         }
