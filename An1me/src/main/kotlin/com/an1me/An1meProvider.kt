@@ -252,16 +252,21 @@ class An1meProvider : MainAPI() {
                     
                     for (i in 0 until epsArr.length()) {
                         val obj = epsArr.getJSONObject(i)
-                        // The episode number is in the "mal_id" field for each episode object
-                        val epNo = obj.optInt("mal_id", -1)
+                        // Try multiple possible field names for episode number
+                        val epNo = obj.optInt("mal_id", -1).takeIf { it > 0 }
+                            ?: obj.optInt("episode", -1).takeIf { it > 0 }
+                            ?: (i + 1 + (page - 1) * 100) // Fallback: calculate from position
+                        
+                        // Try multiple possible field names for episode title
                         val epTitle = obj.optString("title", "").takeIf { it.isNotBlank() && it != "null" } 
                             ?: obj.optString("title_japanese", "").takeIf { it.isNotBlank() && it != "null" }
+                            ?: obj.optString("title_romanji", "").takeIf { it.isNotBlank() && it != "null" }
                         
                         if (epNo > 0 && !epTitle.isNullOrBlank()) {
                             episodesMap[epNo] = epTitle
                             android.util.Log.d("An1me_MAL", "Ep $epNo: $epTitle")
                         } else if (epNo > 0) {
-                            android.util.Log.d("An1me_MAL", "Ep $epNo has no title (MAL data unavailable)")
+                            android.util.Log.d("An1me_MAL", "Ep $epNo has no title (fields checked: title='${obj.optString("title")}', title_japanese='${obj.optString("title_japanese")}')")
                         }
                     }
                     
@@ -578,7 +583,6 @@ class An1meProvider : MainAPI() {
         val enhancedDescription = buildString {
             siteDescription?.let { append(it).append("\n\n") }
             displayScore?.let { append("⭐ AniList Score: $it/100\n") }
-            trailerUrl?.let { append("🎬 Trailer: $it\n") }
             if (charList.isNotEmpty()) {
                 append("👥 Characters:\n")
                 charList.take(10).forEach { append("  • $it\n") }
@@ -693,6 +697,12 @@ class An1meProvider : MainAPI() {
             this.backgroundPosterUrl = bannerUrl
             this.plot = enhancedDescription
             this.tags = tags
+            
+            // Add trailer if available
+            if (trailerUrl != null) {
+                addTrailer(trailerUrl)
+            }
+            
             addEpisodes(DubStatus.Subbed, episodes)
         }
     }
