@@ -530,7 +530,7 @@ class An1meProvider : MainAPI() {
         val trailerObj = anilist?.optJSONObject("trailer")
         val trailerSite = trailerObj?.optString("site")
         val trailerId = trailerObj?.optString("id")
-        val youtubetrailerUrl = if (trailerSite == "youtube" && !trailerId.isNullOrBlank()) {
+        val trailerFinal = if (trailerSite == "youtube" && !trailerId.isNullOrBlank()) {
             "https://www.youtube.com/watch?v=$trailerId"
         } else null
         
@@ -698,9 +698,9 @@ class An1meProvider : MainAPI() {
             this.plot = enhancedDescription
             this.tags = tags
             
-            // Add trailer if available
-            if (youtubetrailerUrl != null) {
-                trailerUrl = youtubetrailerUrl
+             // ✅ Safe trailer assignment
+            if (trailerFinal != null) {
+                this.trailerUrl = trailerFinal
             }
             
             addEpisodes(DubStatus.Subbed, episodes)
