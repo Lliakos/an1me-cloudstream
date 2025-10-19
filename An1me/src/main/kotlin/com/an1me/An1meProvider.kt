@@ -507,10 +507,11 @@ class An1meProvider : MainAPI() {
         } else {
             android.util.Log.w("An1me_Episodes", "No episodes found, falling back to scraping")
             // Fallback: try to scrape visible episodes
+            val seen = mutableSetOf<String>()
             document.select("a[href*='/watch/']").forEach { ep ->
                 try {
                     val epUrl = fixUrl(ep.attr("href"))
-                    if (epUrl.contains("/anime/")) return@forEach
+                    if (epUrl.contains("/anime/") || !seen.add(epUrl)) return@forEach
                     
                     val number = Regex("""episode-(\d+)""").find(epUrl)?.groupValues?.get(1)?.toIntOrNull()
                         ?: episodes.size + 1
@@ -528,6 +529,7 @@ class An1meProvider : MainAPI() {
 
         episodes.sortBy { it.episode }
 
+        // Enrich episode names with MAL titles
         try {
             val lookup = lookupTitle ?: cleanTitleForAniList(siteTitle) ?: siteTitle
             val malEps = fetchMalEpisodeTitlesByTitle(lookup)
@@ -642,3 +644,140 @@ class An1meProvider : MainAPI() {
                         Pair("1080p", "=m37") to Qualities.P1080.value,
                         Pair("720p", "=m22") to Qualities.P720.value,
                         Pair("480p", "=m18") to Qualities.P480.value,
+                        Pair("360p", "=m18") to Qualities.P360.value
+                    )
+
+                    val baseUrl = matches.first().value
+                        .replace("\\u003d", "=")
+                        .replace("\\u0026", "&")
+                        .replace("\\/", "/")
+                        .replace("\\", "")
+                        .substringBefore("=m")
+                        .substringBefore("?")
+
+                    android.util.Log.d("An1me_Video", "Base Google Photos URL: $baseUrl")
+
+                    for ((qualityInfo, qualityValue) in qualityVariants) {
+                        val (qualityName, qualityParam) = qualityInfo
+                        val qualityUrl = "$baseUrl$qualityParam"
+
+                        callback(
+                            createLink(
+                                sourceName = name,
+                                linkName = qualityName,
+                                url = qualityUrl,
+                                referer = decodedUrl,
+                                quality = qualityValue,
+                                type = ExtractorLinkType.VIDEO
+                            )
+                        )
+                    }
+                    return true
+
+                } catch (e: Exception) {
+                    android.util.Log.e("An1me_Video", "Google Photos error: ${e.message}", e)
+                    return false
+                }
+            }
+
+            if (decodedUrl.contains(".m3u8", true)) {
+                android.util.Log.d("An1me_Video", "Detected M3U8")
+
+                try {
+                    val m3u8Response = app.get(decodedUrl).text
+                    val lines = m3u8Response.lines()
+                    var addedAnyQuality = false
+
+                    lines.forEachIndexed { index, line ->
+                        if (line.startsWith("#EXT-X-STREAM-INF")) {
+                            val height = """RESOLUTION=\d+x(\d+)""".toRegex()
+                                .find(line)?.groupValues?.get(1)?.toIntOrNull()
+
+                            val quality = when (height) {
+                                2160 -> Qualities.P2160.value
+                                1440 -> Qualities.P1440.value
+                                1080 -> Qualities.P1080.value
+                                720 -> Qualities.P720.value
+                                480 -> Qualities.P480.value
+                                360 -> Qualities.P360.value
+                                else -> Qualities.Unknown.value
+                            }
+
+                            if (index + 1 < lines.size) {
+                                val urlLine = lines[index + 1]
+                                if (!urlLine.startsWith("#")) {
+                                    val fullUrl = if (urlLine.startsWith("http")) {
+                                        urlLine
+                                    } else {
+                                        "${decodedUrl.substringBeforeLast("/")}/$urlLine"
+                                    }
+
+                                    val safeUrl = fullUrl
+                                        .replace(" ", "%20")
+                                        .replace("[", "%5B")
+                                        .replace("]", "%5D")
+
+                                    callback(
+                                        createLink(
+                                            sourceName = name,
+                                            linkName = "${height}p",
+                                            url = safeUrl,
+                                            referer = data,
+                                            quality = quality,
+                                            type = ExtractorLinkType.M3U8
+                                        )
+                                    )
+                                    addedAnyQuality = true
+                                }
+                            }
+                        }
+                    }
+
+                    if (!addedAnyQuality) {
+                        val safeUrl = decodedUrl
+                            .replace(" ", "%20")
+                            .replace("[", "%5B")
+                            .replace("]", "%5D")
+
+                        callback(
+                            createLink(
+                                sourceName = name,
+                                linkName = name,
+                                url = safeUrl,
+                                referer = data,
+                                quality = Qualities.Unknown.value,
+                                type = ExtractorLinkType.M3U8
+                            )
+                        )
+                    }
+                    return true
+                } catch (e: Exception) {
+                    android.util.Log.e("An1me_Video", "M3U8 error: ${e.message}", e)
+                    return false
+                }
+            }
+
+            if (decodedUrl.contains(".mp4", true)) {
+                android.util.Log.d("An1me_Video", "Detected MP4")
+                callback(
+                    createLink(
+                        sourceName = name,
+                        linkName = "$name (MP4)",
+                        url = decodedUrl,
+                        referer = data,
+                        quality = Qualities.Unknown.value,
+                        type = ExtractorLinkType.VIDEO
+                    )
+                )
+                return true
+            }
+
+            android.util.Log.d("An1me_Video", "No valid video link found")
+            return false
+
+        } catch (e: Exception) {
+            android.util.Log.e("An1me_Video", "Error loading links: ${e.message}", e)
+            return false
+        }
+    }
+}
