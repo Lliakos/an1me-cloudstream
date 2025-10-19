@@ -190,7 +190,7 @@ class An1meProvider : MainAPI() {
         }
     }
 
-    // ---------------- Small helper to choose best AniList title ----------------    private fun pickAniTitle(ani: JSONObject?): String? {
+    // ---------------- Small helper to choose best AniList title ----------------
     private fun pickAniTitle(ani: JSONObject?): String? {
         if (ani == null) return null
         val titleObj = ani.optJSONObject("title") ?: return null
@@ -261,6 +261,58 @@ class An1meProvider : MainAPI() {
         }
     }
 
+    // ---------------- AniList enrichment helper (class-level to avoid scoping issues) ----------------
+    private suspend fun enrichCardListWithAniList(cards: List<AnimeSearchResponse>): List<AnimeSearchResponse> {
+        if (cards.isEmpty()) return cards
+        val enriched = mutableListOf<AnimeSearchResponse>()
+        for (card in cards) {
+            try {
+                val siteTitle = card.title
+                val lookupTitle = cleanTitleForAniList(siteTitle) ?: siteTitle
+                val ani = lookupTitle.let { fetchAniListByTitle(it) }
+                if (ani != null) {
+                    // Replace poster and use AniList title (but keep site title in a fallback variable)
+                    val aniTitle = pickAniTitle(ani)
+                    val cover = ani.optJSONObject("coverImage")?.optString("large", null)
+                        ?: ani.optJSONObject("coverImage")?.optString("medium", null)
+                    if (!aniTitle.isNullOrBlank()) {
+                        // Replace display title with AniList title
+                        try {
+                            card.title = aniTitle
+                        } catch (_: Throwable) {
+                            // ignore if immutable in some API versions
+                        }
+                    }
+                    if (!cover.isNullOrBlank()) {
+                        card.posterUrl = fixUrl(cover)
+                    } else {
+                        // MAL fallback for cover
+                        val malCover = fetchMalCoverByTitle(siteTitle)
+                        if (!malCover.isNullOrBlank()) card.posterUrl = fixUrl(malCover)
+                    }
+                    // Attach averageScore to plot field (small, safe) if available
+                    val score = ani.optInt("averageScore", -1).takeIf { it > 0 }
+                    score?.let {
+                        try {
+                            card.plot = "⭐ $it"
+                        } catch (_: Throwable) {
+                            // plot may not exist on some SearchResponse versions; ignore if so
+                        }
+                    }
+                } else {
+                    // If AniList not found, try MAL cover
+                    val malCover = fetchMalCoverByTitle(card.title)
+                    if (!malCover.isNullOrBlank()) card.posterUrl = fixUrl(malCover)
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("An1me_EnrichCard", "Error enriching card ${card.title}: ${e.message}", e)
+            } finally {
+                enriched.add(card)
+            }
+        }
+        return enriched
+    }
+
     // ---------------- Main page ----------------
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -292,50 +344,7 @@ class An1meProvider : MainAPI() {
             emptyList()
         }
 
-        // ---------------- AniList enrichment for each card list (replace title & poster) ----------------
-        // We enrich the lists first to avoid referencing HomePageList internals and to keep scope clear.
-
-        suspend fun enrichCardListWithAniList(cards: List<AnimeSearchResponse>): List<AnimeSearchResponse> {
-            if (cards.isEmpty()) return cards
-            val enriched = mutableListOf<AnimeSearchResponse>()
-            for (card in cards) {
-                try {
-                    val siteTitle = card.title
-                    val lookupTitle = cleanTitleForAniList(siteTitle) ?: siteTitle
-                    val ani = lookupTitle.let { fetchAniListByTitle(it) }
-                    if (ani != null) {
-                        // Replace poster and use AniList title (but keep site title in a fallback variable)
-                        val aniTitle = pickAniTitle(ani)
-                        val cover = ani.optJSONObject("coverImage")?.optString("large", null)
-                            ?: ani.optJSONObject("coverImage")?.optString("medium", null)
-                        if (!aniTitle.isNullOrBlank()) {
-                            // Replace display title with AniList title
-                            card.title = aniTitle
-                        }
-                        if (!cover.isNullOrBlank()) {
-                            card.posterUrl = fixUrl(cover)
-                        } else {
-                            // MAL fallback for cover
-                            val malCover = fetchMalCoverByTitle(siteTitle)
-                            if (!malCover.isNullOrBlank()) card.posterUrl = fixUrl(malCover)
-                        }
-                        // Attach averageScore to plot field (small, safe) if available
-                        val score = ani.optInt("averageScore", -1).takeIf { it > 0 }
-                        score?.let { card.plot = "⭐ $it" }
-                    } else {
-                        // If AniList not found, try MAL cover
-                        val malCover = fetchMalCoverByTitle(card.title)
-                        if (!malCover.isNullOrBlank()) card.posterUrl = fixUrl(malCover)
-                    }
-                } catch (e: Exception) {
-                    android.util.Log.e("An1me_EnrichCard", "Error enriching card ${card.title}: ${e.message}", e)
-                } finally {
-                    enriched.add(card)
-                }
-            }
-            return enriched
-        }
-
+        // Enrich lists (suspend helper at class level)
         val trendingEnriched = enrichCardListWithAniList(trendingItems)
         val latestEpisodesEnriched = enrichCardListWithAniList(latestEpisodeItems)
         val latestAnimeEnriched = enrichCardListWithAniList(latestAnimeItems)
@@ -387,7 +396,9 @@ class An1meProvider : MainAPI() {
                         val aniTitle = pickAniTitle(ani)
                         val cover = ani.optJSONObject("coverImage")?.optString("large", null)
                             ?: ani.optJSONObject("coverImage")?.optString("medium", null)
-                        if (!aniTitle.isNullOrBlank()) r.title = aniTitle
+                        if (!aniTitle.isNullOrBlank()) {
+                            try { r.title = aniTitle } catch (_: Throwable) {}
+                        }
                         if (!cover.isNullOrBlank()) r.posterUrl = fixUrl(cover)
                         else {
                             val mal = fetchMalCoverByTitle(siteTitle)
