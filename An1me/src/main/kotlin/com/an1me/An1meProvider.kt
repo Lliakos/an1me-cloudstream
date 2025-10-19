@@ -466,79 +466,68 @@ class An1meProvider : MainAPI() {
             append("Source: $name\n")
         }
 
-        val episodes = mutableListOf<Episode>()
-
-        // Extract total episode count from the anime page - looking for "E 26" pattern
+        // Extract total episode count from the anime page
+        // Looking for "E 26" pattern in .text-spec spans
         val totalEpisodes = try {
-            val episodeCountText = document.select(".text-spec span").firstOrNull { 
-                it.text().matches(Regex("""E\s*\d+""", RegexOption.IGNORE_CASE))
-            }?.text()
+            val episodeSpan = document.select(".text-spec span.inline-block").firstOrNull { 
+                it.text().trim().matches(Regex("""^E\s*\d+$""", RegexOption.IGNORE_CASE))
+            }
+            val episodeText = episodeSpan?.text()?.trim()
+            val count = episodeText?.replace(Regex("""[^\d]"""), "")?.toIntOrNull() ?: 0
             
-            val count = episodeCountText?.let {
-                Regex("""E\s*(\d+)""", RegexOption.IGNORE_CASE).find(it)?.groupValues?.get(1)?.toIntOrNull()
-            } ?: 0
-            
-            android.util.Log.d("An1me_Episodes", "Found total episodes: $count")
+            android.util.Log.d("An1me_EpCount", "Found episode indicator: '$episodeText' -> count: $count")
             count
         } catch (e: Exception) {
-            android.util.Log.e("An1me_Episodes", "Error extracting episode count: ${e.message}", e)
+            android.util.Log.e("An1me_EpCount", "Error getting episode count: ${e.message}", e)
             0
         }
 
-        if (totalEpisodes > 0) {
-            // Extract the anime slug from the URL
-            val animeSlug = url.trimEnd('/').substringAfterLast("/anime/").substringBefore("?")
-            android.util.Log.d("An1me_Episodes", "Anime slug: $animeSlug, generating $totalEpisodes episodes")
+        android.util.Log.d("An1me_Episodes", "Total episodes found: $totalEpisodes for URL: $url")
 
-            // Generate all episode URLs based on the pattern: /watch/{anime-slug}-episode-{number}/
-            for (epNum in 1..totalEpisodes) {
-                try {
-                    val epUrl = "$mainUrl/watch/$animeSlug-episode-$epNum/"
-                    
-                    episodes.add(newEpisode(epUrl) {
-                        this.name = "Episode $epNum"
-                        this.episode = epNum
-                        this.posterUrl = finalPoster
-                    })
-                } catch (e: Exception) {
-                    android.util.Log.e("An1me_Episodes", "Error creating episode $epNum: ${e.message}", e)
-                }
+        val episodes = mutableListOf<Episode>()
+        
+        if (totalEpisodes > 0) {
+            // Extract the anime slug from URL
+            // URL format: https://an1me.to/anime/kimetsu-no-yaiba/ or https://an1me.to/anime/kimetsu-no-yaiba
+            val animeSlug = url.replace(mainUrl, "")
+                .replace("/anime/", "")
+                .trim('/')
+            
+            android.util.Log.d("An1me_Episodes", "Anime slug: $animeSlug")
+            
+            // Generate episodes based on the count
+            for (i in 1..totalEpisodes) {
+                val epUrl = "$mainUrl/watch/$animeSlug-episode-$i/"
+                episodes.add(newEpisode(epUrl) {
+                    this.name = "Episode $i"
+                    this.episode = i
+                    this.posterUrl = finalPoster
+                })
             }
         } else {
-            android.util.Log.d("An1me_Episodes", "No episode count found, falling back to scraping")
-            
-            // Fallback: scrape episodes from the page
-            val seen = mutableSetOf<String>()
+            android.util.Log.w("An1me_Episodes", "No episodes found, falling back to scraping")
+            // Fallback: try to scrape visible episodes
             document.select("a[href*='/watch/']").forEach { ep ->
                 try {
-                    val raw = ep.attr("href")
-                    val epUrl = fixUrl(raw)
-                    if (epUrl.isBlank() || epUrl.contains("/anime/") || !seen.add(epUrl)) return@forEach
-
-                    val numberCandidates = listOfNotNull(
-                        ep.selectFirst(".episode-list-item-number")?.text(),
-                        ep.selectFirst(".episode-list-item-title")?.text(),
-                        ep.attr("title"),
-                        ep.text()
-                    ).joinToString(" ")
-
-                    val number = Regex("""(\d{1,4})""").find(numberCandidates)?.groupValues?.get(1)?.toIntOrNull()
+                    val epUrl = fixUrl(ep.attr("href"))
+                    if (epUrl.contains("/anime/")) return@forEach
+                    
+                    val number = Regex("""episode-(\d+)""").find(epUrl)?.groupValues?.get(1)?.toIntOrNull()
                         ?: episodes.size + 1
-
+                    
                     episodes.add(newEpisode(epUrl) {
                         this.name = "Episode $number"
                         this.episode = number
                         this.posterUrl = finalPoster
                     })
                 } catch (e: Exception) {
-                    android.util.Log.e("An1me_Episodes", "Error parsing episode: ${e.message}", e)
+                    android.util.Log.e("An1me_EpParse", "Error parsing episode: ${e.message}", e)
                 }
             }
         }
 
         episodes.sortBy { it.episode }
 
-        // Try to enrich episode names with MAL titles
         try {
             val lookup = lookupTitle ?: cleanTitleForAniList(siteTitle) ?: siteTitle
             val malEps = fetchMalEpisodeTitlesByTitle(lookup)
@@ -553,7 +542,7 @@ class An1meProvider : MainAPI() {
             android.util.Log.e("An1me_EpEnrich", "Error enriching episode names: ${e.message}", e)
         }
 
-        return newAnimeLoadResponse(finalTitle, url, TvType.Anime) {
+        return newAnimeLoadResponse(siteTitle, url, TvType.Anime) {
             this.posterUrl = finalPoster
             this.backgroundPosterUrl = bannerUrl
             this.plot = enhancedDescription
@@ -641,4 +630,15 @@ class An1meProvider : MainAPI() {
 
                     val photoHtml = app.get(decodedUrl, referer = iframeSrc).text
 
-                    val videoRegex = Regex("""(https:\/\/[^"'\s]+googleusercontent\.com[
+                    val videoRegex = Regex("""(https:\/\/[^"'\s]+googleusercontent\.com[^"'\s]+)""")
+                    val matches = videoRegex.findAll(photoHtml).toList()
+
+                    if (matches.isEmpty()) {
+                        android.util.Log.d("An1me_Video", "No googleusercontent links found")
+                        return false
+                    }
+
+                    val qualityVariants = listOf(
+                        Pair("1080p", "=m37") to Qualities.P1080.value,
+                        Pair("720p", "=m22") to Qualities.P720.value,
+                        Pair("480p", "=m18") to Qualities.P480.value,
